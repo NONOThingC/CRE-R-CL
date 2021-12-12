@@ -34,6 +34,15 @@ def compute_jsd_loss(m_input):
     return jsd
 
 
+def id_sentence(config, training_data):
+    data_loader = get_data_loader(config, training_data)
+    id2sentence = {}
+    for step, (labels, tokens) in enumerate(data_loader):
+        for id in range(len(tokens)):
+            id2sentence[step*data_loader.batch_size+id] = tokens[id].detach().numpy().tolist()
+    return id2sentence
+
+
 def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
     data_loader = get_data_loader(config, training_data, shuffle=True)
 
@@ -41,7 +50,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
     dropout_layer.train()
     classifier.train()
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction='sum')
     optimizer = optim.Adam([
         {'params': encoder.parameters(), 'lr': 0.00001},
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
@@ -49,39 +58,49 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
     ])
     for epoch_i in range(epochs):
         losses = []
+        if epoch_i == 0:
+            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, 2)
         for step, (labels, tokens) in enumerate(data_loader):
-            with torch.no_grad():
-                out_prob = []
-                logits_all = []
-                tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-                reps = encoder(tokens)
-                for _ in range(config.f_pass):
-                    output, output1 = dropout_layer(reps)
-                    logits = classifier(output)
-                    out_prob.append(F.softmax(logits, dim=-1))
-                    logits_all.append(logits)
-                out_prob = torch.stack(out_prob)
-                logits_all = torch.stack(logits_all)
-                out_std = torch.std(out_prob, dim=0)
-                '''
-                max_value, max_idx = torch.max(out_prob, dim=-1)
-                max_std = out_std.gather(1, max_idx.view(-1, 1))
-                max_idx=max_idx.cpu()
-                max_std=max_std.cpu()
-                pos_logits,neg_logits,selected_logits=[],[],[]
-                for i in range(config.f_pass):
-                    neg_idx=((max_idx[i]!=labels)*(max_std.squeeze(1)<config.kappa_neg))
-                    pos_idx=((max_idx[i]==labels)*(max_std.squeeze(1)<config.kappa_pos))
-                    pos=logits_all[i][pos_idx]
-                    neg=logits_all[i][neg_idx]
-                    pos_logits.append(pos)
-                    neg_logits.append(neg)
-                    selected_logits.append(torch.vstack([pos,neg]))
-                '''
+            # with torch.no_grad():
 
+            out_prob = []
+            logits_all = []
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            reps = encoder(tokens)
+            for _ in range(config.f_pass):
+                output, output_embedding = dropout_layer(reps)
+                logits = classifier(output)
+                logits_all.append(logits)
+                out_prob.append(F.softmax(logits, dim=-1))
+            out_prob = torch.stack(out_prob)
+            logits_all = torch.stack(logits_all)
+            out_std = torch.std(out_prob, dim=0)
+            out_std_all = []
+            for i in range(config.f_pass):
+                out_std_all.append(out_std)
+            out_std_all = torch.stack(out_std_all)
+            out_std_mask = out_std_all < config.kappa_pos
+            max_value, max_idx = torch.max(out_prob, dim=-1)
+            
+            '''
+            max_std = out_std.gather(1, max_idx.view(-1, 1))
+            max_idx=max_idx.cpu()
+            max_std=max_std.cpu()
+            pos_logits,neg_logits,selected_logits=[],[],[]
+            for i in range(config.f_pass):
+                neg_idx=((max_idx[i]!=labels)*(max_std.squeeze(1)<config.kappa_neg))
+                pos_idx=((max_idx[i]==labels)*(max_std.squeeze(1)<config.kappa_pos))
+                pos=logits_all[i][pos_idx]
+                neg=logits_all[i][neg_idx]
+                pos_logits.append(pos)
+                neg_logits.append(neg)
+                selected_logits.append(torch.vstack([pos,neg]))
+            '''
+            
+            # logits_all[out_std_mask]=-float('inf')
             labels = labels.to(config.device)
             loss1 = 0
-            logits_all.requires_grad_()
+            # logits_all.requires_grad_()
             for i in range(config.f_pass):
                 loss1 += criterion(logits_all[i], labels)
             loss2 = compute_jsd_loss(logits_all)
@@ -93,6 +112,34 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
             torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
             optimizer.step()
         print(f"loss is {np.array(losses).mean()}")
+
+    for step, (labels, tokens) in enumerate(data_loader):
+        id2sentence = {}
+        result={}
+        for id in range(len(tokens)):
+            id2sentence[step * data_loader.batch_size + id] = tokens[id].detach().numpy().tolist()
+        tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+        reps = encoder(tokens)
+        for _ in range(config.f_pass):
+            output, output_embedding = dropout_layer(reps)
+            logits = classifier(output)
+            out_prob=F.softmax(logits, dim=-1)
+            max_value, max_idx = torch.max(out_prob, dim=-1)
+            output_embedding,max_idx=output_embedding.cpu(),max_idx.cpu()
+            output_embedding=output_embedding.detach().numpy().tolist()
+            max_idx=max_idx.detach().numpy().tolist()
+            labels=labels.detach().numpy().tolist()
+            for id in range(len(labels)):
+                mid=[step * data_loader.batch_size + id, output_embedding[id], max_idx[id],labels[id]]
+                if labels[id] not in result:
+                    result[labels[id]]=[mid]
+                else:
+                    result[labels[id]].append(mid)
+
+        with open('id2sentence.json', 'w+') as f:
+            json.dump(id2sentence, f)
+            
+    return id2sentence,result
 
 
 def transfer_to_device(list_ins, device):
@@ -154,7 +201,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
     dropout_layer.train()
     classifier.train()
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction='sum')
     optimizer = optim.Adam([
         {'params': encoder.parameters(), 'lr': 0.00001},
         {'params': dropout_layer.parameters(), 'lr': 0.001},
@@ -171,7 +218,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
             labels = labels.to(config.device)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             reps = encoder(tokens)
-            reps, otuput1 = dropout_layer(reps)
+            reps, output1 = dropout_layer(reps)
             logits = classifier(reps)
 
             loss = criterion(logits, labels)
@@ -381,10 +428,12 @@ if __name__ == '__main__':
         num_class = len(sampler.id2rel)
         memorized_samples = {}
 
+        id2sentence={}
         # load data and start computation
         for steps, (
-        training_data, valid_data, test_data, current_relations, historic_test_data, seen_relations) in enumerate(
-                sampler):
+                training_data, valid_data, test_data, current_relations, historic_test_data,
+                seen_relations) in enumerate(
+            sampler):
 
             print(current_relations)
 
@@ -400,9 +449,11 @@ if __name__ == '__main__':
                 train_data_for_initial += training_data[relation]
 
             # train model
-            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                               config.step1_epochs)
+            # train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs//3)
 
+            # id_sentence
+            id2sentence_1=id_sentence(config, train_data_for_initial)
+            id2sentence.update(id2sentence_1)
             # first model
             train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs)
 
@@ -419,57 +470,3 @@ if __name__ == '__main__':
                 temp_mem[relation] = select_data(config, encoder, training_data[relation])
                 temp_protos.append(get_proto(config, encoder, temp_mem[relation]))
             temp_protos = torch.cat(temp_protos, dim=0).detach()  # detach：设置required_grad为False，不再改变proto的值
-
-            memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
-                                                         input_size=encoder.output_size,
-                                                         output_size=encoder.output_size,
-                                                         key_size=config.key_size,
-                                                         head_size=config.head_size
-                                                         ).to(config.device)
-
-            # generate training data for the corresponding memory model (ungrouped)
-            train_data_for_memory = []
-            for relation in temp_mem.keys():
-                train_data_for_memory += temp_mem[relation]
-            for relation in memorized_samples.keys():
-                train_data_for_memory += memorized_samples[relation]
-            random.shuffle(train_data_for_memory)
-            train_mem_model(config, encoder, classifier, memory_network, train_data_for_memory, temp_protos,
-                            config.step3_epochs)
-
-            # regenerate memory
-            for relation in current_relations:
-                memorized_samples[relation] = select_data(config, encoder, training_data[relation])
-            protos4eval = []
-            for relation in memorized_samples:
-                protos4eval.append(get_proto(config, encoder, memorized_samples[relation]))
-            protos4eval = torch.cat(protos4eval, dim=0).detach()
-
-            test_data_1 = []
-            for relation in current_relations:
-                test_data_1 += test_data[relation]
-
-            test_data_2 = []
-            for relation in seen_relations:
-                test_data_2 += historic_test_data[relation]
-
-            cur_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_1, protos4eval,
-                                            seen_relations)
-            total_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_2, protos4eval,
-                                              seen_relations)
-            # cur_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_1, seen_relations)
-            # total_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_2, seen_relations)
-
-            # encoder.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_encoder_task' + str(steps+1)+'.json')
-            # classifier.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_classifier_task' + str(steps+1)+'.json')
-            # memory_network.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_memory_network_task' + str(steps+1)+'.json')
-            # np.save('./model_parameters/abalation_study/FewRel_10tasks_mem_task' + str(steps+1)+'.npy', protos4eval.cpu().numpy())
-
-            print(f'Restart Num {i + 1}')
-            print(f'task--{steps + 1}:')
-            print(f'current test acc:{cur_acc}')
-            print(f'history test acc:{total_acc}')
-            test_cur.append(cur_acc)
-            test_total.append(total_acc)
-            print(test_cur)
-            print(test_total)
