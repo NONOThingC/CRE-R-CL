@@ -4,6 +4,7 @@ import random
 import torch.nn as nn
 import torch.optim as optim
 import json
+import pickle
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 from argparse import ArgumentParser
@@ -32,7 +33,6 @@ def compute_jsd_loss(m_input):
         loss = loss.sum()
         jsd += loss / m
     return jsd
-
 
 
 def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
@@ -71,30 +71,16 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
             for i in range(config.f_pass):
                 out_std_all.append(out_std)
             out_std_all = torch.stack(out_std_all)
-            out_std_mask = out_std_all < config.kappa_pos
+            # out_std_mask = out_std_all < config.kappa_pos
+            out_std_mask = out_std < config.kappa_pos
             max_value, max_idx = torch.max(out_prob, dim=-1)
-            
-            '''
-            max_std = out_std.gather(1, max_idx.view(-1, 1))
-            max_idx=max_idx.cpu()
-            max_std=max_std.cpu()
-            pos_logits,neg_logits,selected_logits=[],[],[]
-            for i in range(config.f_pass):
-                neg_idx=((max_idx[i]!=labels)*(max_std.squeeze(1)<config.kappa_neg))
-                pos_idx=((max_idx[i]==labels)*(max_std.squeeze(1)<config.kappa_pos))
-                pos=logits_all[i][pos_idx]
-                neg=logits_all[i][neg_idx]
-                pos_logits.append(pos)
-                neg_logits.append(neg)
-                selected_logits.append(torch.vstack([pos,neg]))
-            '''
-            
+
             # logits_all[out_std_mask]=-float('inf')
             labels = labels.to(config.device)
             loss1 = 0
             # logits_all.requires_grad_()
             for i in range(config.f_pass):
-                loss1 += criterion(logits_all[i], labels)
+                loss1 += criterion(logits_all[i][out_std_mask], labels)
             loss2 = compute_jsd_loss(logits_all)
             loss = loss1 + loss2
             losses.append(loss.item())
@@ -107,7 +93,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
 
     for step, (labels, tokens) in enumerate(data_loader):
         id2sentence = {}
-        result={}
+        result = {}
         for id in range(len(tokens)):
             id2sentence[step * data_loader.batch_size + id] = tokens[id].detach().numpy().tolist()
         tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
@@ -115,23 +101,20 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
         for _ in range(config.f_pass):
             output, output_embedding = dropout_layer(reps)
             logits = classifier(output)
-            out_prob=F.softmax(logits, dim=-1)
+            out_prob = F.softmax(logits, dim=-1)
             max_value, max_idx = torch.max(out_prob, dim=-1)
-            output_embedding,max_idx=output_embedding.cpu(),max_idx.cpu()
-            output_embedding=output_embedding.detach().numpy().tolist()
-            max_idx=max_idx.detach().numpy().tolist()
-            labels=labels.detach().numpy().tolist()
+            output_embedding, max_idx = output_embedding.cpu(), max_idx.cpu()
+            # output_embedding=output_embedding.detach().numpy().tolist()
+            # max_idx=max_idx.detach().numpy().tolist()
+            # labels=labels.detach().numpy().tolist()
             for id in range(len(labels)):
-                mid=[step * data_loader.batch_size + id, output_embedding[id], max_idx[id],labels[id]]
+                mid = [step * data_loader.batch_size + id, output_embedding[id], max_idx[id], labels[id]]
                 if labels[id] not in result:
-                    result[labels[id]]=[mid]
+                    result[labels[id]] = [mid]
                 else:
                     result[labels[id]].append(mid)
 
-        with open('id2sentence.json', 'w+') as f:
-            json.dump(id2sentence, f)
-
-    return id2sentence,result
+    return id2sentence, result
 
 
 def transfer_to_device(list_ins, device):
@@ -420,7 +403,8 @@ if __name__ == '__main__':
         num_class = len(sampler.id2rel)
         memorized_samples = {}
 
-        id2sentence={}
+        id2sentence = []
+        result = []
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
@@ -440,23 +424,15 @@ if __name__ == '__main__':
             for relation in current_relations:
                 train_data_for_initial += training_data[relation]
 
-            # train model
-            # train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs//3)
-
-
             # first model
-            id2sentence_1,result_1=train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs)
+            id2sentence_1, result_1 = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial,
+                                                  config.step1_epochs)
+            id2sentence.append(id2sentence_1)
+            result.append(result_1)
 
-            # # Memory Activation
-            # train_data_for_replay = []
-            # random.seed(config.seed+i*100)
-            # for relation in current_relations:
-            #     train_data_for_replay += training_data[relation]
-            # for relation in memorized_samples:
-            #     train_data_for_replay += memorized_samples[relation]
-            # train_simple_model(config, encoder, classifier, train_data_for_replay, config.step2_epochs)
-
-            for relation in current_relations:
-                temp_mem[relation] = select_data(config, encoder, training_data[relation])
-                temp_protos.append(get_proto(config, encoder, temp_mem[relation]))
-            temp_protos = torch.cat(temp_protos, dim=0).detach()  # detach：设置required_grad为False，不再改变proto的值
+        with open('id2sentence.pkl', 'wb') as f:
+            for i in id2sentence:
+                pickle.dump(i, f)
+        with open('result.pkl', 'wb') as f:
+            for j in result:
+                pickle.dump(j, f)
