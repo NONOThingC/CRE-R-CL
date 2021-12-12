@@ -34,14 +34,6 @@ def compute_jsd_loss(m_input):
     return jsd
 
 
-def id_sentence(config, training_data):
-    data_loader = get_data_loader(config, training_data)
-    id2sentence = {}
-    for step, (labels, tokens) in enumerate(data_loader):
-        for id in range(len(tokens)):
-            id2sentence[step*data_loader.batch_size+id] = tokens[id].detach().numpy().tolist()
-    return id2sentence
-
 
 def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
     data_loader = get_data_loader(config, training_data, shuffle=True)
@@ -138,7 +130,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
 
         with open('id2sentence.json', 'w+') as f:
             json.dump(id2sentence, f)
-            
+
     return id2sentence,result
 
 
@@ -451,11 +443,9 @@ if __name__ == '__main__':
             # train model
             # train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs//3)
 
-            # id_sentence
-            id2sentence_1=id_sentence(config, train_data_for_initial)
-            id2sentence.update(id2sentence_1)
+
             # first model
-            train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs)
+            id2sentence_1,result_1=train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs)
 
             # # Memory Activation
             # train_data_for_replay = []
