@@ -1,3 +1,8 @@
+import collections
+import itertools
+import pickle
+from math import ceil
+
 import numpy as np
 import torch
 import random
@@ -278,150 +283,328 @@ def evaluate_strict_no_mem_model(config, encoder, classifier, test_data, seen_re
 
     return correct/n
 
-def get_contrastive_data(quadruple,id2txt,batch_size):
-    # 根据句子簇分类,得到分好类的变量假设是 cluster2sentences
-
-    # get between class samples and positive, negative samples
-    btw_cls=[]
-    p_n=[]
-    # get positive, negative samples
-    for t_lbl,quad_list in cluster2sentences.items():
-        for quad in quad_list:
 
 
+class sample_dataloader(object):
 
-    #
+    def __init__(self,quadruple, id2sent,batch_size,config=None, seed=None):
+        self.quadruple=quadruple
+        self.id2sent=id2sent
+        self.data_idx=self.get_contrastive_data(self.quadruple,batch_size)
+        self.config = config
+        self._ix=0
+        self.to_Tensor
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            l_idx,is_p_data = self.data_idx[self._ix]
+        except IndexError:
+            # Possibly reset `self._ix`?
+            raise StopIteration
+
+            batch_all=[self.quadruple[i] for i in l_idx]
+            sent_inp,emb_inp,preds,trues=[],[],[],[]
+            for (sent_id,emb,pred,true) in batch_all:
+                sent_inp.append(self.id2sent[sent_id])
+                emb_inp.append(emb)
+                preds.append(pred)
+                trues.append(true)
+            labels=np.zeros(shape=(len(trues),len(trues)))
+            if is_p_data:
+                comparison=None
+                for i in range(1,len(trues)):
+                    for j in range(0,i):
+                        labels[i][j]=(trues[i]==trues[j])
+            else:
+                comparison = torch.ones((len(trues), len(trues)))
+                for i in range(1, len(trues)):
+                    for j in range(0, i):
+                        labels[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) * (trues[i] == trues[j])
+                        # AB+AB^C+A^BC
+                        comparison[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) or (
+                                    (preds[i] == trues[i]) * (preds[j] != trues[j]) + (preds[i] != trues[i]) * (
+                                        preds[j] == trues[j])) * (trues[i] == trues[j])
+            labels+=labels.T
+            for i in range(len(trues)):
+                labels[i][i]=(preds[i]==trues[i])
+            labels=torch.IntTensor(labels)
+
+
+        self._ix += 1
+        return sent_inp,emb_inp,labels,comparison
+
+    def get_contrastive_data(self,quadruple,  batch_size):
+        """
+        From
+        1. Positive and negative embeddings in one sentence.
+        2. Between cluster
+        3. In cluster different sentence positive embedding.
+        """
+        # 根据句子簇分类,得到分好类的变量假设是 cluster2sentences
+
+        # import pandas as pd
+        # col_name=["sent_id", "embedding", "pred_id", "true_id"]
+        # df=pd.DataFrame(zip(*quadruple),columns=col_name)
+        # df["is_p"]=(df["pred_id"]==df["true_id"])
+        # df["is_n"] = (df["pred_id"] != df["true_id"])
+        # # 1. Positive and negative embeddings in one sentence
+        # stat=df.groupby("sent_id")[["is_p"]].count().reset_index().describe()
+        # stat_n = df.groupby("sent_id")[["is_n"]].sum().reset_index().describe()
+        # print(f"Median of same sentence sample:{stat.loc['50%']}, min of same sentence sample:{stat.loc['min']}\nMedian of negative sample:{stat_n.loc['50%']}, min of same sentence sample:{stat_n.loc['min']}")
+        #
+        # p_pool = df.loc[df["is_p"] == True].values.tolist()
+        #
+        # # get positive negetive pool
+        # pt_pool = sorted(quadruple, key=lambda x: x[0]) if batch_size < median_num else None
+        # sample by batch
+
+        # if pt_pool is not None:
+        pn_batch_idx = []
+        p_idx = []
+        p_batch_idx = []  # get positive pool
+        sent_id2ins_id = collections.defaultdict(list)
+        count = 0
+        for i, quad in enumerate(quadruple):
+            sent_id2ins_id[quad[0]].append(i)
+            if quad[-1] == quad[-2]:
+                p_idx.append(i)
+
+        p_batch_idx.append((self.multi_sample_no_replace(p_idx, batch_size),1))
+        for ins in sent_id2ins_id.values():
+            n = len(ins) / batch_size
+            if n > 0:
+                pn_batch_idx.append((self.multi_sample_no_replace(ins, batch_size),0))
+                # for i in range(round(n - 0.1)):
+                #     pn_batch_idx.append(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
+            else:
+                if n > 0.8:  # just sample when enough positive and negative samples
+                    count += 1
+                    print(f"Over sampling num:{count}")
+                    pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(),0))
+        random.shuffle(p_batch_idx.extend(pn_batch_idx))
+        return p_batch_idx
+
+    def multi_sample_no_replace(self,list_collection, n,shuffle=True):
+        if shuffle:
+            random.shuffle(list_collection)
+        return list(self.split_list_by_n(list_collection,n,last_to_n=True))
+
+    def split_list_by_n(self,list_collection, n,last_to_n=False):
+        """
+        将list均分，每份n个元素
+        :return:返回的结果为评分后的每份可迭代对象
+        """
+
+        for i in range(0, len(list_collection), n):
+            if last_to_n:
+                if (i+n)>len(list_collection):
+                    yield list_collection[i:]+random.choice(list_collection,i+n-len(list_collection)-1)
+                else:
+                    yield list_collection[i: i + n]
+
+            else:
+                yield list_collection[i: i + n]
+
+    def set_seed(self, seed):
+        self.seed = seed
+        if self.seed != None:
+            random.seed(self.seed)
+        self.shuffle_index = list(range(len(self.id2rel)))
+        random.shuffle(self.shuffle_index)
+        self.shuffle_index = np.argsort(self.shuffle_index)
+
+
+
+    def _read_data(self, file):
+        '''
+        :param file: the input sample file
+        :return: samples for the model: [relation label, text]
+        '''
+        data = json.load(open(file, 'r', encoding='utf-8'))
+        train_dataset = [[] for i in range(self.config.num_of_relation)]
+        val_dataset = [[] for i in range(self.config.num_of_relation)]
+        test_dataset = [[] for i in range(self.config.num_of_relation)]
+        for relation in data.keys():
+            rel_samples = data[relation]
+            if self.seed != None:
+                random.seed(self.seed)
+            random.shuffle(rel_samples)
+            count = 0
+            count1 = 0
+            for i, sample in enumerate(rel_samples):
+                tokenized_sample = {}
+                tokenized_sample['relation'] = self.rel2id[sample['relation']]
+                tokenized_sample['tokens'] = self.tokenizer.encode(' '.join(sample['tokens']),
+                                                                   padding='max_length',
+                                                                   truncation=True,
+                                                                   max_length=self.config.max_length)
+                if self.config.task_name == 'FewRel':
+                    if i < self.config.num_of_train:
+                        train_dataset[self.rel2id[relation]].append(tokenized_sample)
+                    elif i < self.config.num_of_train + self.config.num_of_val:
+                        val_dataset[self.rel2id[relation]].append(tokenized_sample)
+                    else:
+                        test_dataset[self.rel2id[relation]].append(tokenized_sample)
+                else:
+                    if i < len(rel_samples) // 5 and count <= 40:
+                        count += 1
+                        test_dataset[self.rel2id[relation]].append(tokenized_sample)
+                    else:
+                        count1 += 1
+                        train_dataset[self.rel2id[relation]].append(tokenized_sample)
+                        if count1 >= 320:  # 一个关系最多320个样本
+                            break
+        return train_dataset, val_dataset, test_dataset
+
+    def _read_relations(self, file):
+        '''
+        :param file: input relation file
+        :return:  a list of relations, and a mapping from relations to their ids.
+        '''
+        id2rel = json.load(open(file, 'r', encoding='utf-8'))
+        rel2id = {}
+        for i, x in enumerate(id2rel):
+            rel2id[x] = i
+        return id2rel, rel2id
+
+
+    
 
 
 if __name__ == '__main__':
-
-    parser = ArgumentParser(
-        description="Config for lifelong relation extraction (classification)")
-    parser.add_argument('--config', default='config.ini')
-    args = parser.parse_args()
-    config = Config(args.config)
-
-    config.device = torch.device(config.device)
-    config.n_gpu = torch.cuda.device_count()
-    config.batch_size_per_step = int(config.batch_size / config.gradient_accumulation_steps)
-
-    # output result
-    printer = outputer()
-    middle_printer = outputer()
-    start_printer=outputer()
-
-    # set training batch
-    for i in range(config.total_round):
-
-        test_cur = []
-        test_total = []
-
-        # set random seed
-        random.seed(config.seed+i*100)
-
-        # sampler setup
-        sampler = data_sampler(config=config, seed=config.seed+i*100)
-        id2rel = sampler.id2rel
-        rel2id = sampler.rel2id
-        # encoder setup
-        encoder = Bert_Encoder(config=config).to(config.device)
-        # classifier setup
-        classifier = Softmax_Layer(input_size=encoder.output_size, num_class=config.num_of_relation).to(config.device)
-
-        # record testing results
-        sequence_results = []
-        result_whole_test = []
-
-        # initialize memory and prototypes
-        num_class = len(sampler.id2rel)
-        memorized_samples = {}
-
-        # load data and start computation
-        for steps, (training_data, valid_data, test_data, current_relations, historic_test_data, seen_relations) in enumerate(sampler):
-
-            # print(current_relations)
-            # section 1: 前向计算，算mdropout并让loss最小，然后用不确定度选择出正负样本并存入文件。因为后面涉及到对关系的对比学习，对比学习格式是：
-            # 每个数据应该有以下几个特征：（预测类别，真实样本关系类别，样本，向量，对错）
-            # 对比样本和向量的相似度，输入左边是样本，右边是向量。
-            # 所以根据样本来进行采样。
-            # 样本，向量，真实样本关系类别==预测类别
-
-            temp_mem = {}
-            temp_protos = []
-            for relation in seen_relations:
-                if relation not in current_relations:
-                    temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
-                    
-            # Initial
-            train_data_for_initial = []
-            for relation in current_relations:
-                train_data_for_initial += training_data[relation]
-            # train model
-            train_simple_model(config, encoder, classifier, train_data_for_initial, config.step1_epochs)
-
-
-            # # Memory Activation
-            # train_data_for_replay = []
-            # random.seed(config.seed+i*100)
-            # for relation in current_relations:
-            #     train_data_for_replay += training_data[relation]
-            # for relation in memorized_samples:
-            #     train_data_for_replay += memorized_samples[relation]
-            # train_simple_model(config, encoder, classifier, train_data_for_replay, config.step2_epochs)
-
-            for relation in current_relations:
-                temp_mem[relation] = select_data(config, encoder, training_data[relation])
-                temp_protos.append(get_proto(config, encoder, temp_mem[relation]))
-            temp_protos = torch.cat(temp_protos, dim=0).detach()
-
-            memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
-                                              input_size=encoder.output_size,
-                                              output_size=encoder.output_size,
-                                              key_size=config.key_size,
-                                              head_size=config.head_size
-                                              ).to(config.device)
-
-            # generate training data for the corresponding memory model (ungrouped)
-            train_data_for_memory = []
-            for relation in temp_mem.keys():
-                train_data_for_memory += temp_mem[relation]
-            for relation in memorized_samples.keys():
-                train_data_for_memory += memorized_samples[relation]
-            random.shuffle(train_data_for_memory)
-            train_mem_model(config, encoder, classifier, memory_network, train_data_for_memory, temp_protos, config.step3_epochs)
-
-            # regenerate memory
-            for relation in current_relations:
-                memorized_samples[relation] = select_data(config, encoder, training_data[relation])
-            protos4eval = []
-            for relation in memorized_samples:
-                protos4eval.append(get_proto(config, encoder, memorized_samples[relation]))
-            protos4eval = torch.cat(protos4eval, dim=0).detach()
-
-            test_data_1 = []
-            for relation in current_relations:
-                test_data_1 += test_data[relation]
-
-            test_data_2 = []
-            for relation in seen_relations:
-                test_data_2 += historic_test_data[relation]
-
-            cur_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_1, protos4eval,seen_relations)
-            total_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_2, protos4eval,seen_relations)
-            # cur_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_1, seen_relations)
-            # total_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_2, seen_relations)
-
-            # encoder.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_encoder_task' + str(steps+1)+'.json')
-            # classifier.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_classifier_task' + str(steps+1)+'.json')
-            # memory_network.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_memory_network_task' + str(steps+1)+'.json')
-            # np.save('./model_parameters/abalation_study/FewRel_10tasks_mem_task' + str(steps+1)+'.npy', protos4eval.cpu().numpy())
-
-            print(f'Restart Num {i+1}')
-            print(f'task--{steps + 1}:')
-            print(f'current test acc:{cur_acc}')
-            print(f'history test acc:{total_acc}')
-            test_cur.append(cur_acc)
-            test_total.append(total_acc)
-            print(test_cur)
-            print(test_total)
+    with open("id2sentence.pkl","rb") as f,open("quads.pkl","rb") as f1:
+        id2sent,quads=pickle.load(f),pickle.load(f1)
+        get_contrastive_data(quads, id2sent)
+    # parser = ArgumentParser(
+    #     description="Config for lifelong relation extraction (classification)")
+    # parser.add_argument('--config', default='config.ini')
+    # args = parser.parse_args()
+    # config = Config(args.config)
+    #
+    # config.device = torch.device(config.device)
+    # config.n_gpu = torch.cuda.device_count()
+    # config.batch_size_per_step = int(config.batch_size / config.gradient_accumulation_steps)
+    #
+    # # output result
+    # printer = outputer()
+    # middle_printer = outputer()
+    # start_printer=outputer()
+    #
+    # # set training batch
+    # for i in range(config.total_round):
+    #
+    #     test_cur = []
+    #     test_total = []
+    #
+    #     # set random seed
+    #     random.seed(config.seed+i*100)
+    #
+    #     # sampler setup
+    #     sampler = data_sampler(config=config, seed=config.seed+i*100)
+    #     id2rel = sampler.id2rel
+    #     rel2id = sampler.rel2id
+    #     # encoder setup
+    #     encoder = Bert_Encoder(config=config).to(config.device)
+    #     # classifier setup
+    #     classifier = Softmax_Layer(input_size=encoder.output_size, num_class=config.num_of_relation).to(config.device)
+    #
+    #     # record testing results
+    #     sequence_results = []
+    #     result_whole_test = []
+    #
+    #     # initialize memory and prototypes
+    #     num_class = len(sampler.id2rel)
+    #     memorized_samples = {}
+    #
+    #     # load data and start computation
+    #     for steps, (training_data, valid_data, test_data, current_relations, historic_test_data, seen_relations) in enumerate(sampler):
+    #
+    #         # print(current_relations)
+    #         # section 1: 前向计算，算mdropout并让loss最小，然后用不确定度选择出正负样本并存入文件。因为后面涉及到对关系的对比学习，对比学习格式是：
+    #         # 每个数据应该有以下几个特征：（预测类别，真实样本关系类别，样本，向量，对错）
+    #         # 对比样本和向量的相似度，输入左边是样本，右边是向量。
+    #         # 所以根据样本来进行采样。
+    #         # 样本，向量，真实样本关系类别==预测类别
+    #
+    #         temp_mem = {}
+    #         temp_protos = []
+    #         for relation in seen_relations:
+    #             if relation not in current_relations:
+    #                 temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
+    #
+    #         # Initial
+    #         train_data_for_initial = []
+    #         for relation in current_relations:
+    #             train_data_for_initial += training_data[relation]
+    #         # train model
+    #         train_simple_model(config, encoder, classifier, train_data_for_initial, config.step1_epochs)
+    #
+    #
+    #         # # Memory Activation
+    #         # train_data_for_replay = []
+    #         # random.seed(config.seed+i*100)
+    #         # for relation in current_relations:
+    #         #     train_data_for_replay += training_data[relation]
+    #         # for relation in memorized_samples:
+    #         #     train_data_for_replay += memorized_samples[relation]
+    #         # train_simple_model(config, encoder, classifier, train_data_for_replay, config.step2_epochs)
+    #
+    #         for relation in current_relations:
+    #             temp_mem[relation] = select_data(config, encoder, training_data[relation])
+    #             temp_protos.append(get_proto(config, encoder, temp_mem[relation]))
+    #         temp_protos = torch.cat(temp_protos, dim=0).detach()
+    #
+    #         memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
+    #                                           input_size=encoder.output_size,
+    #                                           output_size=encoder.output_size,
+    #                                           key_size=config.key_size,
+    #                                           head_size=config.head_size
+    #                                           ).to(config.device)
+    #
+    #         # generate training data for the corresponding memory model (ungrouped)
+    #         train_data_for_memory = []
+    #         for relation in temp_mem.keys():
+    #             train_data_for_memory += temp_mem[relation]
+    #         for relation in memorized_samples.keys():
+    #             train_data_for_memory += memorized_samples[relation]
+    #         random.shuffle(train_data_for_memory)
+    #         train_mem_model(config, encoder, classifier, memory_network, train_data_for_memory, temp_protos, config.step3_epochs)
+    #
+    #         # regenerate memory
+    #         for relation in current_relations:
+    #             memorized_samples[relation] = select_data(config, encoder, training_data[relation])
+    #         protos4eval = []
+    #         for relation in memorized_samples:
+    #             protos4eval.append(get_proto(config, encoder, memorized_samples[relation]))
+    #         protos4eval = torch.cat(protos4eval, dim=0).detach()
+    #
+    #         test_data_1 = []
+    #         for relation in current_relations:
+    #             test_data_1 += test_data[relation]
+    #
+    #         test_data_2 = []
+    #         for relation in seen_relations:
+    #             test_data_2 += historic_test_data[relation]
+    #
+    #         cur_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_1, protos4eval,seen_relations)
+    #         total_acc = evaluate_strict_model(config, encoder, classifier, memory_network, test_data_2, protos4eval,seen_relations)
+    #         # cur_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_1, seen_relations)
+    #         # total_acc = evaluate_strict_no_mem_model(config, encoder, classifier, test_data_2, seen_relations)
+    #
+    #         # encoder.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_encoder_task' + str(steps+1)+'.json')
+    #         # classifier.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_classifier_task' + str(steps+1)+'.json')
+    #         # memory_network.save_parameters('./model_parameters/abalation_study/FewRel_10tasks_memory_network_task' + str(steps+1)+'.json')
+    #         # np.save('./model_parameters/abalation_study/FewRel_10tasks_mem_task' + str(steps+1)+'.npy', protos4eval.cpu().numpy())
+    #
+    #         print(f'Restart Num {i+1}')
+    #         print(f'task--{steps + 1}:')
+    #         print(f'current test acc:{cur_acc}')
+    #         print(f'history test acc:{total_acc}')
+    #         test_cur.append(cur_acc)
+    #         test_total.append(total_acc)
+    #         print(test_cur)
+    #         print(test_total)
 

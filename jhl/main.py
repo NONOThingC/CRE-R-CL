@@ -1,3 +1,17 @@
+import os
+import sys
+# 找到当前文件的决定路径,__file__ 表示当前文件,也就是test.py
+file_path = os.path.abspath(__file__)
+print(file_path)
+# 获取当前文件所在的目录
+cur_path = os.path.dirname(file_path)
+print(cur_path)
+# 获取项目所在路径
+project_path = os.path.dirname(cur_path)
+print(project_path)
+# 把项目路径加入python搜索路径
+sys.path.append(project_path)
+
 import numpy as np
 import torch
 import random
@@ -34,6 +48,7 @@ def compute_jsd_loss(m_input):
         jsd += loss / m
     return jsd
 
+# def computer_CrossEntropyLoss(predicts,labels):
 
 def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
     data_loader = get_data_loader(config, training_data, shuffle=True)
@@ -48,73 +63,123 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
         {'params': classifier.parameters(), 'lr': 0.001}
     ])
+    id2sent = []
+    ret_d = []
     for epoch_i in range(epochs):
         losses = []
         if epoch_i == 0:
             train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, 2)
         for step, (labels, tokens) in enumerate(data_loader):
             # with torch.no_grad():
-
+            optimizer.zero_grad()
             out_prob = []
             logits_all = []
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            labels = labels.to(config.device)
             reps = encoder(tokens)
+            output_embeddings=[]
             for _ in range(config.f_pass):
                 output, output_embedding = dropout_layer(reps)
+                if epoch_i == epochs - 1:
+                    output_embeddings.append(output_embedding)
                 logits = classifier(output)
                 logits_all.append(logits)
                 out_prob.append(F.softmax(logits, dim=-1))
-            out_prob = torch.stack(out_prob)
+            out_prob = torch.stack(out_prob)#m,B,C
             logits_all = torch.stack(logits_all)
             out_std = torch.std(out_prob, dim=0)
-            out_std_all = []
-            for i in range(config.f_pass):
-                out_std_all.append(out_std)
-            out_std_all = torch.stack(out_std_all)
-            # out_std_mask = out_std_all < config.kappa_pos
-            out_std_mask = out_std < config.kappa_pos
-            max_value, max_idx = torch.max(out_prob, dim=-1)
+            # out_std_all = []
+            # for i in range(config.f_pass):
+            #     out_std_all.append(out_std)#xx
+            # out_std_all = torch.stack(out_std_all)
+            out_std_all=out_std.expand((config.f_pass,out_std.shape[0],-1))#mBC
+            #uncertainty
+            out_std_mask = out_std < config.kappa_pos#不满足被标志为1之后去除 #BC
 
+
+            out_std_mask= out_std_mask.expand((config.f_pass,out_std_mask.shape[0],-1))#m B C
+            max_idx = torch.argmax(out_prob, dim=-1)#m,B
+            m_labels=labels.expand((config.f_pass,labels.shape[0]))#m,B
+            labels_mask = torch.zeros_like(out_std_mask).scatter_(-1, m_labels.view(m_labels.shape[0],-1,1), 1)#m,B,C
+            preds_mask=torch.zeros_like(out_std_mask).scatter_(-1, max_idx.view(max_idx.shape[0],-1,1), 1)#m,B,C
+
+            p_mask=(labels_mask==preds_mask)*out_std_mask#m,B,C
+            n_mask=(labels_mask!=preds_mask)*out_std_mask#m,B,C
+            # torch.index_select(x, 0, indices)
+            p_index=(p_mask.sum(dim=-1) > 0)#m B
+            n_index = (n_mask.sum(dim=-1) > 0)  # m B
+
+            p_labels,n_labels=m_labels[p_index],m_labels[n_index]
+            p_logits,n_logits=logits_all[p_index],logits_all[n_index]
+            slt_labels=torch.cat([p_labels,n_labels],dim=0)
+            slt_logits=torch.cat([p_logits,n_logits],dim=0)
+
+            # slt_labels=m_labels[(out_std_mask.sum(dim=-1)>0)] #对吗？
+
+            # batch_p = torch.index_select(m_labels, 0, p_index)    # B
+            # batch_n=(n_mask.sum(dim=-1) > 0).nonzero()
             # logits_all[out_std_mask]=-float('inf')
-            labels = labels.to(config.device)
-            loss1 = 0
+            # batch_p = torch.index_select(m_labels, 0, p_index)
+
+            # labels=labels*out_std_mask
+            loss1 = criterion(slt_logits, slt_labels)
             # logits_all.requires_grad_()
-            for i in range(config.f_pass):
-                loss1 += criterion(logits_all[i][out_std_mask], labels)
-            loss2 = compute_jsd_loss(logits_all)
+            # for i in range(config.f_pass):
+            #     loss1 += criterion(logits_all[i][out_std_mask], labels)
+            loss2 = compute_jsd_loss(slt_logits)#??
             loss = loss1 + loss2
-            losses.append(loss.item())
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(encoder.parameters(), config.max_grad_norm)
-            torch.nn.utils.clip_grad_norm_(dropout_layer.parameters(), config.max_grad_norm)
-            torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
+            losses.append(loss.item())
+            # torch.nn.utils.clip_grad_norm_(encoder.parameters(), config.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(dropout_layer.parameters(), config.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
             optimizer.step()
+
+            # data store
+            if epoch_i==epochs-1:
+
+                with torch.no_grad():
+                    id2sent.extend(tokens.cpu())
+                    #index range:[step * data_loader.batch_size + id,step * data_loader.batch_size + len(tokens))
+
+                    m_tokens_ids=torch.Tensor(range(step * data_loader.batch_size,step * data_loader.batch_size + len(tokens))).expand(config.f_pass,-1)#m B
+                    m_embeddings=torch.stack(output_embeddings)#m B H
+                    slt_tokens_ids = torch.cat([m_tokens_ids[p_index], m_tokens_ids[n_index]], dim=0).int().tolist()
+                    slt_embeddings = torch.cat([m_embeddings[p_index], m_embeddings[n_index]], dim=0).cpu()
+                    slt_preds = torch.cat([max_idx[p_index], max_idx[n_index]], dim=0).tolist()
+                    slt_labels=slt_labels.tolist()
+                    for i in range(len(slt_tokens_ids)):
+                        ret_d.append((slt_tokens_ids[i],slt_embeddings[i],slt_preds[i],slt_labels[i]))
+
+
+
         print(f"loss is {np.array(losses).mean()}")
 
-    for step, (labels, tokens) in enumerate(data_loader):
-        id2sentence = {}
-        result = {}
-        for id in range(len(tokens)):
-            id2sentence[step * data_loader.batch_size + id] = tokens[id].detach().numpy().tolist()
-        tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-        reps = encoder(tokens)
-        for _ in range(config.f_pass):
-            output, output_embedding = dropout_layer(reps)
-            logits = classifier(output)
-            out_prob = F.softmax(logits, dim=-1)
-            max_value, max_idx = torch.max(out_prob, dim=-1)
-            output_embedding, max_idx = output_embedding.cpu(), max_idx.cpu()
-            # output_embedding=output_embedding.detach().numpy().tolist()
-            # max_idx=max_idx.detach().numpy().tolist()
-            # labels=labels.detach().numpy().tolist()
-            for id in range(len(labels)):
-                mid = [step * data_loader.batch_size + id, output_embedding[id], max_idx[id], labels[id]]
-                if labels[id] not in result:
-                    result[labels[id]] = [mid]
-                else:
-                    result[labels[id]].append(mid)
+    # with torch.no_grad():
+    #     for step, (labels, tokens) in enumerate(data_loader):
+    #         id2sentence = {}
+    #         result = {}
+    #         for id in range(len(tokens)):
+    #             id2sentence[step * data_loader.batch_size + id] = tokens[id].detach().numpy().tolist()
+    #         tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+    #         reps = encoder(tokens)
+    #         for _ in range(config.f_pass):
+    #             output, output_embedding = dropout_layer(reps)
+    #             logits = classifier(output)
+    #             out_prob = F.softmax(logits, dim=-1)
+    #             max_value, max_idx = torch.max(out_prob, dim=-1)
+    #             output_embedding, max_idx = output_embedding.cpu(), max_idx.cpu()
+    #             # output_embedding=output_embedding.detach().numpy().tolist()
+    #             # max_idx=max_idx.detach().numpy().tolist()
+    #             # labels=labels.detach().numpy().tolist()
+    #             for id in range(len(labels)):
+    #                 mid = [step * data_loader.batch_size + id, output_embedding[id], max_idx[id], labels[id]]
+    #                 if labels[id] not in result:
+    #                     result[labels[id]] = [mid]
+    #                 else:
+    #                     result[labels[id]].append(mid)
 
-    return id2sentence, result
+    return id2sent,ret_d
 
 
 def transfer_to_device(list_ins, device):
@@ -186,9 +251,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
     for epoch_i in range(epochs):
         losses = []
         for step, (labels, tokens) in enumerate(data_loader):
-            encoder.zero_grad()
-            dropout_layer.zero_grad()
-            classifier.zero_grad()
+            optimizer.zero_grad()
 
             labels = labels.to(config.device)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
@@ -404,7 +467,7 @@ if __name__ == '__main__':
         memorized_samples = {}
 
         id2sentence = []
-        result = []
+        quads = []
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
@@ -415,9 +478,9 @@ if __name__ == '__main__':
 
             temp_mem = {}
             temp_protos = []
-            for relation in seen_relations:
-                if relation not in current_relations:
-                    temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
+            # for relation in seen_relations:
+            #     if relation not in current_relations:
+            #         temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
 
             # Initial
             train_data_for_initial = []
@@ -425,14 +488,12 @@ if __name__ == '__main__':
                 train_data_for_initial += training_data[relation]
 
             # first model
-            id2sentence_1, result_1 = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial,
+            id2sentence_1, quads_1 = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial,
                                                   config.step1_epochs)
-            id2sentence.append(id2sentence_1)
-            result.append(result_1)
+            id2sentence.extend(id2sentence_1)
+            quads.extend(quads_1)
 
         with open('id2sentence.pkl', 'wb') as f:
-            for i in id2sentence:
-                pickle.dump(i, f)
-        with open('result.pkl', 'wb') as f:
-            for j in result:
-                pickle.dump(j, f)
+            pickle.dump(id2sentence, f)
+        with open('quads.pkl', 'wb') as f:
+            pickle.dump(quads, f)

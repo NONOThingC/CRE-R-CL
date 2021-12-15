@@ -4,6 +4,8 @@ import numpy as np
 import time
 import sys
 
+
+
 def set_seed(config, seed):
     random.seed(seed)
     np.random.seed(seed)
