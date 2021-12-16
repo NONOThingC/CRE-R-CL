@@ -32,7 +32,7 @@ from model.memory_network.attention_memory_simplified import Attention_Memory_Si
 
 from utils import outputer
 
-from sampler import data_sampler
+from Sampler.sample_dataloader import sample_dataloader, data_sampler
 from data_loader import get_data_loader
 
 
