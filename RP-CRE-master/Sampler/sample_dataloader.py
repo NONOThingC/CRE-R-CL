@@ -69,7 +69,9 @@ class sample_dataloader(object):
         2. comparsion为0时labels为0
         要求尽量使用矩阵操作
         """
-        pass
+        if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or comparison[labels == 0].sum() != 0 or \
+                labels[comparison == 0].sum() != 0:
+            raise Exception('labels and comparison not matched')
 
     def get_contrastive_data(self, quadruple, batch_size):
         """
