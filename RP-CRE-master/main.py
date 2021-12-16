@@ -169,6 +169,8 @@ def contrastive_loss(hidden, labels, temperature=0.4,
     # batch_size = hidden1.shape[0]
     # hidden1_large = hidden1
     # hidden2_large = hidden2
+
+    logsoftmax = nn.LogSoftmax()
     CEL = nn.CrossEntropyLoss(weight=weights)
     # labels = torch.one_hot(torch.range(batch_size), batch_size * 2)#因为是和自己做所以只有对角线为正
     # masks = torch.one_hot(torch.range(batch_size), batch_size)#注意这个函数pytorch无
