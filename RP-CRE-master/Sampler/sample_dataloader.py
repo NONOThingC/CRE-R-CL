@@ -33,36 +33,36 @@ class sample_dataloader(object):
             # Possibly reset `self._ix`?
             raise StopIteration
 
-            batch_all = [self.quadruple[i] for i in l_idx]
-            sent_inp, emb_inp, preds, trues = [], [], [], []
-            for (sent_id, emb, pred, true) in batch_all:
-                sent_inp.append(self.id2sent[sent_id])
-                emb_inp.append(emb)
-                preds.append(pred)
-                trues.append(true)
-            labels = np.zeros(shape=(len(trues), len(trues)))
-            if is_p_data:
-                comparison = None
-                for i in range(1, len(trues)):
-                    for j in range(0, i):
-                        labels[i][j] = (trues[i] == trues[j])
-            else:
-                comparison = torch.ones((len(trues), len(trues)))
-                for i in range(1, len(trues)):
-                    for j in range(0, i):
-                        labels[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) * (trues[i] == trues[j])
-                        # AB+AB^C+A^BC
-                        comparison[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) or (
-                                (preds[i] == trues[i]) * (preds[j] != trues[j]) + (preds[i] != trues[i]) * (
-                                preds[j] == trues[j])) * (trues[i] == trues[j])
-            labels += labels.T
-            for i in range(len(trues)):
-                labels[i][i] = (preds[i] == trues[i])
-            labels = torch.IntTensor(labels)
+        batch_all = [self.quadruple[i] for i in l_idx]
+        sent_inp, emb_inp, preds, trues = [], [], [], []
+        for (sent_id, emb, pred, true) in batch_all:
+            sent_inp.append(torch.IntTensor(self.id2sent[sent_id]))
+            emb_inp.append(emb)
+            preds.append(pred)
+            trues.append(true)
+        labels = np.zeros(shape=(len(trues), len(trues)))
+        if is_p_data:
+            comparison = torch.ones((len(trues), len(trues)))
+            for i in range(1, len(trues)):
+                for j in range(0, i):
+                    labels[i][j] = (trues[i] == trues[j])
+        else:
+            comparison = torch.ones((len(trues), len(trues)))
+            for i in range(1, len(trues)):
+                for j in range(0, i):
+                    labels[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) * (trues[i] == trues[j])
+                    # AB+AB^C+A^BC
+                    comparison[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) or (
+                            (preds[i] == trues[i]) * (preds[j] != trues[j]) + (preds[i] != trues[i]) * (
+                            preds[j] == trues[j])) * (trues[i] == trues[j])
+        labels += labels.T
+        for i in range(len(trues)):
+            labels[i][i] = (preds[i] == trues[i])
+        labels = torch.IntTensor(labels)
 
         self.verify_metrix(labels, comparison)
         sent_inp = torch.stack(sent_inp)
-        emb_inp = torch.stack((emb_inp))
+        emb_inp = torch.stack(emb_inp)
         self._ix += 1
         return sent_inp, emb_inp, labels, comparison
 
@@ -70,12 +70,11 @@ class sample_dataloader(object):
         """
         labels和comparison是两个相同的方阵，设计实现以下功能：
         检测以下情况，不满足时候抛出错误：
-        1. labels为1时comparison为True(1)，labels为0时comparison为False(0)
+        1. labels为1时comparison为True(1)
         2. comparsion为0时labels为0
         要求尽量使用矩阵操作
         """
-        if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or comparison[labels == 0].sum() != 0 or \
-                labels[comparison == 0].sum() != 0:
+        if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
             raise Exception('labels and comparison not matched')
 
     def get_contrastive_data(self, memory, batch_size):
@@ -117,19 +116,21 @@ class sample_dataloader(object):
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
 
-        p_batch_idx.append((self.multi_sample_no_replace(p_idx, batch_size), 1))
+        p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
         for ins in sent_id2ins_id.values():
             n = len(ins) / batch_size
-            if n > 0:
-                pn_batch_idx.append((self.multi_sample_no_replace(ins, batch_size), 0))
+            if n >= 1:
+                for i in self.multi_sample_no_replace(ins, batch_size):
+                    pn_batch_idx.append((i, 0))
                 # for i in range(round(n - 0.1)):
-                #     pn_batch_idx.append(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
+                #     pn_batch_idx.extend(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
             else:
                 if n > 0.8:  # just sample when enough positive and negative samples
                     count += 1
                     print(f"Over sampling num:{count}")
                     pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
-        random.shuffle(p_batch_idx.extend(pn_batch_idx))
+        p_batch_idx.extend(pn_batch_idx)
+        random.shuffle(p_batch_idx)
         return p_batch_idx
 
     def multi_sample_no_replace(self, list_collection, n, shuffle=True):
@@ -146,7 +147,8 @@ class sample_dataloader(object):
         for i in range(0, len(list_collection), n):
             if last_to_n:
                 if (i + n) > len(list_collection):
-                    yield list_collection[i:] + random.choice(list_collection, i + n - len(list_collection) - 1)
+                    yield list_collection[i:] + np.random.choice(a=list_collection, size=i + n - len(list_collection),
+                                                                 replace=False).tolist()
                 else:
                     yield list_collection[i: i + n]
 
@@ -157,9 +159,6 @@ class sample_dataloader(object):
         self.seed = seed
         if self.seed != None:
             random.seed(self.seed)
-        self.shuffle_index = list(range(len(self.id2rel)))
-        random.shuffle(self.shuffle_index)
-        self.shuffle_index = np.argsort(self.shuffle_index)
 
 
 class data_sampler(object):

@@ -22,11 +22,13 @@ class ContrastiveNetwork(base_model):
 
     def forward(self, enc_inp, proj_inp, comparison):
         mid_hidden = self.encoder(enc_inp)
-        if mid_hidden.shape[0] != self.hidden_size:
+        if mid_hidden.shape[1] != self.hidden_size:
             mid_hidden = self.dim_trans(mid_hidden)
-        hidden = self.projector1(self.relu(self.projector(torch.concat([mid_hidden, proj_inp], dim=0))))
-        hidden = torch.linalg.norm(hidden, dim=-1)
-        hidden1, hidden2 = torch.split(hidden, 2, dim=0)
+        hidden = self.projector1(self.relu(self.projector(torch.cat([mid_hidden, proj_inp], dim=0))))
+
+        hidden = F.normalize(hidden, dim=-1, p=2)
+        # hidden = torch.linalg.norm(hidden, dim=-1)
+        hidden1, hidden2 = torch.split(hidden, len(hidden) // 2, dim=0)
         logits_aa = torch.matmul(hidden1, torch.transpose(hidden2, -1, -2)) / self.temperature
-        logits_aa = logits_aa + (~comparison) * (-LARGE_NUM)  # mask
+        logits_aa = logits_aa + (comparison == 0) * (-LARGE_NUM)  # mask
         return logits_aa

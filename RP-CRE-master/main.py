@@ -40,7 +40,7 @@ from data_loader import get_data_loader
 
 
 def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator):
-    train_dataloader, valid_dataloader = dataloader
+    train_dataloader = dataloader
     softmax = nn.Softmax()
     for ep in range(config.train_epoch):
         ## train
@@ -118,7 +118,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
         # epoch logger and print start
 
     # epoch logger and print start
-    batch_avg_acc = batch_cum_acc / len(valid_dataloader)
+    batch_avg_acc = batch_cum_acc / len(train_dataloader)
 
     # log_dict = {
     #     "val_ent_seq_acc": batch_avg_acc,
@@ -143,7 +143,7 @@ def contrastive_loss(hidden, labels):
     # batch_size = hidden1.shape[0]
     # hidden1_large = hidden1
     # hidden2_large = hidden2
-    logsoftmax = nn.LogSoftmax()
+    logsoftmax = nn.LogSoftmax(dim=-1)
 
     return -(logsoftmax(hidden) * labels).sum() / labels.sum()
 
@@ -169,17 +169,15 @@ def enable_dropout(model):
 
 
 def select_to_memory(config, encoder, dropout_layer, classifier, training_data, memory):
-    data_loader = get_data_loader(config, training_data, shuffle=True)
+    data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
     encoder.eval()
     dropout_layer.eval()
     classifier.eval()
 
-    ret_d = []
-
     with torch.no_grad():
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
             # with torch.no_grad():
-
+            tokens_id = torch.stack(tokens_id, dim=0)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)  # b,s
             labels = labels.to(config.device)  # b
             reps = encoder(tokens)
@@ -188,10 +186,7 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
             # model prediction
             out_prob = F.softmax(logits, dim=-1)
             max_idx_true = torch.argmax(out_prob, dim=-1)  # B
-            labels_mask = torch.zeros(max_idx_true.shape[0], config.num_of_relation).scatter_(-1, labels.view(
-                labels.shape[0], 1), 1)  # B,C
-            preds_mask = torch.zeros(max_idx_true.shape[0], config.num_of_relation).scatter_(-1, max_idx_true.view(
-                max_idx_true.shape[0], 1), 1)  # B,C
+
 
             enable_dropout(dropout_layer)
             out_prob = []
@@ -205,17 +200,22 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
             out_prob = torch.stack(out_prob)  # m b c
             out_std = torch.std(out_prob, dim=0)  # B,C
 
+            labels_mask = torch.zeros_like(out_std).scatter_(-1, labels.view(
+                labels.shape[0], 1), 1)  # B,C
+            preds_mask = torch.zeros_like(out_std).scatter_(-1, max_idx_true.view(
+                max_idx_true.shape[0], 1), 1)  # B,C
             # uncertainty
             slt_mask = (out_std < config.kappa_pos) * (labels_mask == preds_mask)  # 不满足被标志为1之后去除 #BC
 
             slt_idx = torch.sum(slt_mask, dim=-1)  # B,C->B
             slt_tokens_ids, slt_embeddings, slt_preds, slt_labels = tokens_id[slt_idx], output_embedding_true[slt_idx], \
                                                                     max_idx_true[slt_idx], labels[slt_idx]
-            slt_unct = torch.sum(out_std * slt_mask, dim=-1)[slt_idx] #
+            slt_unct = torch.sum(out_std * slt_mask, dim=-1)[slt_idx]  #
             # data store
             # quadruple.extend(tokens)
             # index range:[step * data_loader.batch_size + id,step * data_loader.batch_size + len(tokens))
 
+            config.K = 10  # TODO!!!!!!!!!!!!!!!!!!!!!
             for i in range(len(slt_tokens_ids)):
                 memory_list = memory[slt_labels[i].item()]
                 k = len(memory_list)
@@ -225,12 +225,13 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
                                    slt_labels[i].item())))
                 while k > config.K:
                     heapq.heappop(memory_list)
+                    k -= 1
     return memory
 
 
-def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
+def train_first(config, encoder, dropout_layer, classifier, training_data):
     data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
-
+    epochs = config.train_epoch
     encoder.train()
     dropout_layer.train()
     classifier.train()
@@ -649,6 +650,8 @@ if __name__ == '__main__':
         # sampler setup
         sampler = data_sampler(config=config, seed=config.seed + i * 100)
         id2sentence = sampler.get_id2sent()
+        with open('id2sentence.pkl', 'wb') as f:
+            pickle.dump(id2sentence, f)
         id2rel = sampler.id2rel
         rel2id = sampler.rel2id
         # encoder setup
@@ -657,7 +660,8 @@ if __name__ == '__main__':
         dropout_layer = Dropout_Layer(config=config, input_size=encoder.output_size).to(config.device)
         # classifier setup
         classifier = Softmax_Layer(input_size=encoder.output_size, num_class=config.num_of_relation).to(config.device)
-        contrastive_network = ContrastiveNetwork(config=config, encoder=encoder, hidden_size=config.encoder_output_size)
+        contrastive_network = ContrastiveNetwork(config=config, encoder=encoder,
+                                                 hidden_size=config.encoder_output_size).to(config.device)
         # record testing results
         sequence_results = []
         result_whole_test = []
@@ -671,7 +675,7 @@ if __name__ == '__main__':
         memorized_samples = {}
 
         memory = collections.defaultdict(list)
-        quads = []
+
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
@@ -679,7 +683,8 @@ if __name__ == '__main__':
             sampler):
 
             print(current_relations)
-
+            if steps == 3:
+                break
             temp_mem = {}
             temp_protos = []
             # for relation in seen_relations:
@@ -687,42 +692,44 @@ if __name__ == '__main__':
             #         temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
 
             # Initial
+            # 注意！！！！！！！数据更新可能不对！！！！！
             train_data_for_initial = []
             for relation in current_relations:
                 train_data_for_initial += training_data[relation]
             if steps == 0:
                 train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, 2)
             # first model
-            quads_1 = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                                  config.step1_epochs)
+            quads = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial)
 
-            quads.extend(quads_1)
+            with open('quads.pkl', 'wb') as f:
+                pickle.dump(quads, f)
 
-        with open('id2sentence.pkl', 'wb') as f:
-            pickle.dump(id2sentence, f)
-        with open('quads.pkl', 'wb') as f:
-            pickle.dump(quads, f)
+            ctst_dload = sample_dataloader(quadruple=quads, memory=memory, id2sent=id2sentence, config=config,
+                                           seed=config.seed + i * 100)
+            optimizer = optim.Adam([
+                {'params': contrastive_network.parameters(), 'lr': 1e-5}
+            ])
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                        step_size=decay_steps,
+                                                        gamma=decay_rate)
+            inp_dict = {
+                "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+            }
 
-        ctst_dload = sample_dataloader(quadruple=quads, memory=memory, id2sent=id2sentence, config=config,
-                                       seed=config.seed + i * 100)
-        optimizer = optim.Adam([
-            {'params': encoder.parameters(), 'lr': 0.00001},
-            {'params': contrastive_network.parameters(), 'lr': 1e-5}
-        ])
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                    step_size=decay_steps,
-                                                    gamma=decay_rate)
-        inp_dict = {
-            "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-            "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-        }
+            train_contrastive(**inp_dict)
+            # memory update
 
-        train_contrastive(**inp_dict)
-        # memory update
+            # memory={}
+            #
+            select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial, memory)
+            test_data_1 = []
+            for relation in current_relations:
+                test_data_1 += test_data[relation]
 
-        # memory={}
-        #
-        select_to_memory(config, encoder, dropout_layer, classifier, training_data, memory)
-
-        evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, seen_relations)
-        print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
+            test_data_2 = []
+            for relation in seen_relations:
+                test_data_2 += historic_test_data[relation]
+            evaluate_first_model(config, encoder, dropout_layer, classifier, test_data=test_data_1,
+                                 seen_relations=test_data_2)
+            # print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
