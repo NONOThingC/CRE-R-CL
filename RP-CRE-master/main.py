@@ -180,10 +180,9 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
             # with torch.no_grad():
 
-            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-            labels = labels.to(config.device)
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)  # b,s
+            labels = labels.to(config.device)  # b
             reps = encoder(tokens)
-            output_embeddings = []
             output, output_embedding_true = dropout_layer(reps)  # B H
             logits = classifier(output)
             # model prediction
@@ -212,7 +211,7 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
             slt_idx = torch.sum(slt_mask, dim=-1)  # B,C->B
             slt_tokens_ids, slt_embeddings, slt_preds, slt_labels = tokens_id[slt_idx], output_embedding_true[slt_idx], \
                                                                     max_idx_true[slt_idx], labels[slt_idx]
-            slt_unct = torch.sum(out_std * slt_mask, dim=-1)[slt_idx]
+            slt_unct = torch.sum(out_std * slt_mask, dim=-1)[slt_idx] #
             # data store
             # quadruple.extend(tokens)
             # index range:[step * data_loader.batch_size + id,step * data_loader.batch_size + len(tokens))
@@ -222,15 +221,15 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
                 k = len(memory_list)
                 heapq.heappush(memory_list,
                                (-slt_unct[i].item(), (
-                               slt_tokens_ids[i].item(), slt_embeddings[i].cpu(), slt_preds[i].item(),
-                               slt_labels[i].item())))
+                                   slt_tokens_ids[i].tolist(), slt_embeddings[i].cpu(), slt_preds[i].item(),
+                                   slt_labels[i].item())))
                 while k > config.K:
                     heapq.heappop(memory_list)
     return memory
 
 
 def train_first(config, encoder, dropout_layer, classifier, training_data, epochs):
-    data_loader = get_data_loader(config, training_data, shuffle=True)
+    data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
 
     encoder.train()
     dropout_layer.train()
