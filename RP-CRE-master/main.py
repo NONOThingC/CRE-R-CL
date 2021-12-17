@@ -252,7 +252,8 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
             optimizer.zero_grad()
             out_prob = []
             logits_all = []
-            tokens_bak = tokens
+
+            tokens_id = torch.stack(tokens_id, dim=0)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             labels = labels.to(config.device)
             reps = encoder(tokens)

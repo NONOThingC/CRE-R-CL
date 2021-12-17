@@ -14,8 +14,6 @@
 /jhl/data/data_without_marker_tacred.json
 /RP-CRE-master/data/data_without_marker_tacred.json
 /RP-CRE-master/.idea/deployment.xml
-
-/RP-CRE-master/model/classifier/dropout_layer.py
 /jhl/data/id2rel.json
 /RP-CRE-master/data/id2rel.json
 /jhl/data/id2rel_tacred.json
