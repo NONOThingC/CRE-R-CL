@@ -9,10 +9,10 @@ from transformers import BertTokenizer
 
 class sample_dataloader(object):
 
-    def __init__(self, quadruple, id2sent, config=None, seed=None):
+    def __init__(self, quadruple, memory, id2sent, config=None, seed=None):
         self.quadruple = quadruple
         self.id2sent = id2sent
-        self.data_idx = self.get_contrastive_data(self.quadruple, config.batch_size)
+        self.data_idx = self.get_contrastive_data(memory, config.batch_size)
         self.config = config
         self._ix = 0
 
@@ -78,12 +78,13 @@ class sample_dataloader(object):
                 labels[comparison == 0].sum() != 0:
             raise Exception('labels and comparison not matched')
 
-    def get_contrastive_data(self, quadruple, batch_size):
+    def get_contrastive_data(self, memory, batch_size):
         """
         From
         1. Positive and negative embeddings in one sentence.
         2. Between cluster
         3. In cluster different sentence positive embedding.
+        4. From memory.
         """
         # 根据句子簇分类,得到分好类的变量假设是 cluster2sentences
 
@@ -109,7 +110,9 @@ class sample_dataloader(object):
         p_batch_idx = []  # get positive pool
         sent_id2ins_id = collections.defaultdict(list)
         count = 0
-        for i, quad in enumerate(quadruple):
+        for true_label, (_, quad_ins) in memory:
+            self.quadruple.append(quad_ins)
+        for i, quad in enumerate(self.quadruple):
             sent_id2ins_id[quad[0]].append(i)
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
@@ -234,7 +237,8 @@ class data_sampler(object):
         train_dataset = [[] for i in range(self.config.num_of_relation)]
         val_dataset = [[] for i in range(self.config.num_of_relation)]
         test_dataset = [[] for i in range(self.config.num_of_relation)]
-        for relation in data.keys():
+        self.id2sent = {}
+        for j, relation in enumerate(data.keys()):
             rel_samples = data[relation]
             if self.seed != None:
                 random.seed(self.seed)
@@ -243,11 +247,13 @@ class data_sampler(object):
             count1 = 0
             for i, sample in enumerate(rel_samples):
                 tokenized_sample = {}
+                tokenized_sample["tokens_id"] = j * len(rel_samples) + i
                 tokenized_sample['relation'] = self.rel2id[sample['relation']]
                 tokenized_sample['tokens'] = self.tokenizer.encode(' '.join(sample['tokens']),
                                                                    padding='max_length',
                                                                    truncation=True,
                                                                    max_length=self.config.max_length)
+                self.id2sent[j * len(rel_samples) + i] = tokenized_sample['tokens']
                 if self.config.task_name == 'FewRel':
                     if i < self.config.num_of_train:
                         train_dataset[self.rel2id[relation]].append(tokenized_sample)
@@ -276,3 +282,6 @@ class data_sampler(object):
         for i, x in enumerate(id2rel):
             rel2id[x] = i
         return id2rel, rel2id
+
+    def get_id2sent(self):
+        return self.id2sent

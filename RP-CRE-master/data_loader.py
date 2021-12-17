@@ -17,9 +17,11 @@ class data_set(Dataset):
     def collate_fn(self, data):
         label = torch.tensor([item['relation'] for item in data])
         tokens = [torch.tensor(item['tokens']) for item in data]
+        tokens_id = [torch.tensor(item['tokens_id']) for item in data]
         return (
             label,
-            tokens
+            tokens,
+            tokens_id
         )
 
 def get_data_loader(config, data, shuffle = False, drop_last = False, batch_size = None):
