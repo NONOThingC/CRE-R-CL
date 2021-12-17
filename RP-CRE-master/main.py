@@ -504,75 +504,21 @@ def train_mem_model(config, encoder, classifier, memory_network, training_data, 
             optimizer.step()
         print(f"loss is {np.array(losses).mean()}")
 
-
-def evaluate_model(config, encoder, classifier, memory_network, test_data, protos4eval):
+#是否加入memory？如何加入
+def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data,seen_relations):
     data_loader = get_data_loader(config, test_data, batch_size=1)
     encoder.eval()
-    classifier.eval()
-    memory_network.eval()
-    n = len(test_data)
-
-    correct = 0
-    protos4eval.unsqueeze(0)
-    protos4eval = protos4eval.expand(data_loader.batch_size, -1, -1)
-    for step, (labels, tokens) in enumerate(data_loader):
-        mem_for_batch = protos4eval.clone()
-        labels = labels.to(config.device)
-        tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-        reps = encoder(tokens)
-        reps = memory_network(reps, mem_for_batch)
-        logits = classifier(reps)
-
-        neg_index = random.sample(range(0, 80), 10)
-        neg_sim = logits[:, neg_index].cpu().data.numpy()
-        max_smi = np.max(neg_sim, axis=1)
-
-        label_smi = logits[:, labels].cpu().data.numpy()
-
-        if label_smi >= max_smi:
-            correct += 1
-
-    return correct / n
-
-
-def evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data):
-    data_loader = get_data_loader(config, test_data, batch_size=1)
-    encoder.train()
     dropout_layer.eval()
     classifier.eval()
     n = len(test_data)
-
-    cum_acc = 0
+    correct = 0
+    #cum_acc = 0
     for step, (labels, tokens) in enumerate(data_loader):
         labels = labels.to(config.device)
         tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
         reps = encoder(tokens)
         reps, output1 = dropout_layer(reps)
         logits = classifier(reps)
-        max_idx = torch.argmax(logits, dim=-1)
-        cum_acc += (max_idx == labels).sum() / labels.shape[0]
-
-    return cum_acc / len(data_loader)
-
-
-def evaluate_strict_model(config, encoder, classifier, memory_network, test_data, protos4eval, seen_relations):
-    data_loader = get_data_loader(config, test_data, batch_size=1)
-    encoder.eval()
-    classifier.eval()
-    memory_network.eval()
-    n = len(test_data)
-
-    correct = 0
-    protos4eval.unsqueeze(0)
-    protos4eval = protos4eval.expand(data_loader.batch_size, -1, -1)
-    for step, (labels, tokens) in enumerate(data_loader):
-        mem_for_batch = protos4eval.clone()
-        labels = labels.to(config.device)
-        tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-        reps = encoder(tokens)
-        reps = memory_network(reps, mem_for_batch)
-        logits = classifier(reps)
-
         seen_relation_ids = [rel2id[relation] for relation in seen_relations]
         seen_sim = logits[:, seen_relation_ids].cpu().data.numpy()
         max_smi = np.max(seen_sim, axis=1)
@@ -584,29 +530,6 @@ def evaluate_strict_model(config, encoder, classifier, memory_network, test_data
     return correct / n
 
 
-def evaluate_strict_no_mem_model(config, encoder, classifier, test_data, seen_relations):
-    data_loader = get_data_loader(config, test_data, batch_size=1)
-    encoder.eval()
-    classifier.eval()
-    n = len(test_data)
-
-    correct = 0
-    for step, (labels, tokens) in enumerate(data_loader):
-        labels = labels.to(config.device)
-        tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-        reps = encoder(tokens)
-        logits = classifier(reps)
-
-        seen_relation_ids = [rel2id[relation] for relation in seen_relations]
-        seen_sim = logits[:, seen_relation_ids].cpu().data.numpy()
-        max_smi = np.max(seen_sim, axis=1)
-
-        label_smi = logits[:, labels].cpu().data.numpy()
-
-        if label_smi >= max_smi:
-            correct += 1
-
-    return correct / n
 
 
 if __name__ == '__main__':
@@ -685,6 +608,26 @@ if __name__ == '__main__':
                                                  config.step1_epochs)
             id2sentence.extend(id2sentence_1)
             quads.extend(quads_1)
+            test_data_1 = []
+            for relation in current_relations:
+                test_data_1 += test_data[relation]
+
+            test_data_2 = []
+            for relation in seen_relations:
+                test_data_2 += historic_test_data[relation]
+
+            cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
+            total_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
+
+            print(f'Restart Num {i+1}')
+            print(f'task--{steps + 1}:')
+            print(f'current test acc:{cur_acc}')
+            print(f'history test acc:{total_acc}')
+            test_cur.append(cur_acc)
+            test_total.append(total_acc)
+            print(test_cur)
+            print(test_total)
+
 
         with open('id2sentence.pkl', 'wb') as f:
             pickle.dump(id2sentence, f)
@@ -711,4 +654,4 @@ if __name__ == '__main__':
         #
         # select_data(encoder,)
 
-        print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
+        #print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
