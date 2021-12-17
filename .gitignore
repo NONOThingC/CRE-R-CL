@@ -14,7 +14,7 @@
 /jhl/data/data_without_marker_tacred.json
 /RP-CRE-master/data/data_without_marker_tacred.json
 /RP-CRE-master/.idea/deployment.xml
-/jhl/model/classifier/dropout_layer.py
+
 /RP-CRE-master/model/classifier/dropout_layer.py
 /jhl/data/id2rel.json
 /RP-CRE-master/data/id2rel.json
@@ -27,6 +27,5 @@
 /RP-CRE-master/README.md
 /RP-CRE-master/.idea/remote-mappings.xml
 /RP-CRE-master/.idea/RP-CRE-master.iml
-/jhl/model/classifier/softmax_classifier.py
 /RP-CRE-master/.idea/vcs.xml
 /RP-CRE-master/.idea/webServers.xml

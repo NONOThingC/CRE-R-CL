@@ -1,8 +1,10 @@
 # -- coding: utf-8 --
 import collections
-import random
-import numpy as np
 import torch
+import numpy as np
+import json
+import random
+from transformers import BertTokenizer
 
 
 class sample_dataloader(object):
@@ -17,6 +19,9 @@ class sample_dataloader(object):
         self.seed = seed
         if self.seed != None:
             self.set_seed(self.seed)
+
+    def __len__(self):
+        return len(self.data_idx)
 
     def __iter__(self):
         return self
@@ -69,7 +74,9 @@ class sample_dataloader(object):
         2. comparsion为0时labels为0
         要求尽量使用矩阵操作
         """
-        pass
+        if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or comparison[labels == 0].sum() != 0 or \
+                labels[comparison == 0].sum() != 0:
+            raise Exception('labels and comparison not matched')
 
     def get_contrastive_data(self, quadruple, batch_size):
         """
@@ -150,12 +157,6 @@ class sample_dataloader(object):
         self.shuffle_index = list(range(len(self.id2rel)))
         random.shuffle(self.shuffle_index)
         self.shuffle_index = np.argsort(self.shuffle_index)
-
-
-import numpy as np
-import json
-import random
-from transformers import BertTokenizer
 
 
 class data_sampler(object):
