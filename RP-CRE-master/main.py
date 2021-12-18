@@ -205,9 +205,9 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
             preds_mask = torch.zeros_like(out_std).scatter_(-1, max_idx_true.view(
                 max_idx_true.shape[0], 1), 1)  # B,C
             # uncertainty
-            slt_mask = (out_std < config.kappa_pos) * (labels_mask == preds_mask)  # 不满足被标志为1之后去除 #BC
+            slt_mask = (out_std < config.kappa_pos) * (labels_mask * preds_mask)  # 不满足被标志为1之后去除 #BC
 
-            slt_idx = torch.sum(slt_mask, dim=-1)  # B,C->B
+            slt_idx = torch.sum(slt_mask, dim=-1) > 0  # B,C->B
             slt_tokens_ids, slt_embeddings, slt_preds, slt_labels = tokens_id[slt_idx], output_embedding_true[slt_idx], \
                                                                     max_idx_true[slt_idx], labels[slt_idx]
             slt_unct = torch.sum(out_std * slt_mask, dim=-1)[slt_idx]  #
@@ -283,8 +283,9 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
                                                                   1)  # m,B,C
             preds_mask = torch.zeros_like(out_std_mask).scatter_(-1, max_idx.view(max_idx.shape[0], -1, 1), 1)  # m,B,C
 
-            p_mask = (labels_mask == preds_mask) * out_std_mask  # m,B,C
-            n_mask = (labels_mask != preds_mask) * out_std_mask  # m,B,C
+            # slt_mask=out_std_mask.sum(dim=-1) > 0 #m B
+            p_mask = labels_mask * preds_mask * out_std_mask  # m,B,C
+            n_mask = ~labels_mask * preds_mask * out_std_mask  # m,B,C #没预测对且预测值类别的不确定度很高
             # torch.index_select(x, 0, indices)
             p_index = (p_mask.sum(dim=-1) > 0)  # m B
             n_index = (n_mask.sum(dim=-1) > 0)  # m B
@@ -604,7 +605,7 @@ def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, 
     n = len(test_data)
     correct = 0
     # cum_acc = 0
-    for step, (labels, tokens) in enumerate(data_loader):
+    for step, (labels, tokens, tokens_id) in enumerate(data_loader):
         labels = labels.to(config.device)
         tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
         reps = encoder(tokens)
