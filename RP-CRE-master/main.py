@@ -60,6 +60,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
             # zero the parameter gradients
             optimizer.zero_grad()
             sent_inp, emb_inp, labels, comparison = batch_train_data
+            #emb_inp有很多0，会有问题吗
             # model forward start
             inp_dict = {
 
@@ -246,9 +247,11 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
     ret_d = []
     for epoch_i in range(epochs):
         losses = []
-
+        batch_cum_loss, batch_cum_acc = 0., 0.
+        t_ep = time.time()
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
             # with torch.no_grad():
+            t_batch = time.time()
             optimizer.zero_grad()
             out_prob = []
             logits_all = []
@@ -315,6 +318,28 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
             # torch.nn.utils.clip_grad_norm_(dropout_layer.parameters(), config.max_grad_norm)
             # torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
             optimizer.step()
+
+            acc=(torch.argmax(slt_logits, dim=-1) == slt_labels).sum()/(config.f_pass*len(labels))
+
+            batch_cum_loss += loss
+            batch_cum_acc += acc
+
+            batch_avg_loss = batch_cum_loss / (step + 1)
+            batch_avg_acc = batch_cum_acc / (step + 1)
+            batch_print_format = "\r Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
+            # batch logger and print start
+            print(batch_print_format.format(
+                epoch_i + 1,
+                config.train_epoch,
+                step + 1,
+                len(data_loader),
+                batch_avg_loss,
+                batch_avg_acc,
+                optimizer.param_groups[0]['lr'],
+                time.time() - t_batch,
+                time.time() - t_ep,
+            ),
+                end="")
 
             # data store
             if epoch_i == epochs - 1:
@@ -598,7 +623,7 @@ def evaluate_strict_no_mem_model(config, encoder, classifier, test_data, seen_re
 
 
 def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, seen_relations):
-    data_loader = get_data_loader(config, test_data, batch_size=config.batch_size)
+    data_loader = get_data_loader(config, test_data, batch_size=1)
     encoder.eval()
     dropout_layer.eval()
     classifier.eval()
@@ -661,6 +686,7 @@ if __name__ == '__main__':
         dropout_layer = Dropout_Layer(config=config, input_size=encoder.output_size).to(config.device)
         # classifier setup
         classifier = Softmax_Layer(input_size=encoder.output_size, num_class=config.num_of_relation).to(config.device)
+        #这里的encoder没有加dropout_layer
         contrastive_network = ContrastiveNetwork(config=config, encoder=encoder,
                                                  hidden_size=config.encoder_output_size).to(config.device)
         # record testing results
@@ -701,7 +727,6 @@ if __name__ == '__main__':
                 train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, 2)
             # first model
             quads = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial)
-
             with open('quads.pkl', 'wb') as f:
                 pickle.dump(quads, f)
 
@@ -731,6 +756,8 @@ if __name__ == '__main__':
             test_data_2 = []
             for relation in seen_relations:
                 test_data_2 += historic_test_data[relation]
-            evaluate_first_model(config, encoder, dropout_layer, classifier, test_data=test_data_1,
-                                 seen_relations=test_data_2)
+            cur_acc=evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
+            total_acc=evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
             # print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
+            print(f'current test acc:{cur_acc}')
+            print(f'history test acc:{total_acc}')
