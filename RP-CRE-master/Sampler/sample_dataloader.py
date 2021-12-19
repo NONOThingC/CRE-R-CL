@@ -5,7 +5,7 @@ import numpy as np
 import json
 import random
 from transformers import BertTokenizer
-
+from torch.utils.data import Dataset
 
 class sample_dataloader(object):
 
@@ -31,12 +31,13 @@ class sample_dataloader(object):
             l_idx, is_p_data = self.data_idx[self._ix]
         except IndexError:
             # Possibly reset `self._ix`?
+            self._ix = 0
             raise StopIteration
 
         batch_all = [self.quadruple[i] for i in l_idx]
         sent_inp, emb_inp, preds, trues = [], [], [], []
         for (sent_id, emb, pred, true) in batch_all:
-            sent_inp.append(torch.IntTensor(self.id2sent[sent_id]))
+            sent_inp.append(torch.tensor(self.id2sent[sent_id]).int())
             emb_inp.append(emb)
             preds.append(pred)
             trues.append(true)
@@ -109,14 +110,18 @@ class sample_dataloader(object):
         p_batch_idx = []  # get positive pool
         sent_id2ins_id = collections.defaultdict(list)
         count = 0
-        for true_label, (_, quad_ins) in memory:
-            self.quadruple.append(quad_ins)
+
+        for all_items in memory.values():
+            for _, quad_ins in all_items:
+                self.quadruple.append(quad_ins)
+
         for i, quad in enumerate(self.quadruple):
             sent_id2ins_id[quad[0]].append(i)
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
 
         p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
+        # negative
         for ins in sent_id2ins_id.values():
             n = len(ins) / batch_size
             if n >= 1:
@@ -130,6 +135,7 @@ class sample_dataloader(object):
                     print(f"Over sampling num:{count}")
                     pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
         p_batch_idx.extend(pn_batch_idx)
+
         random.shuffle(p_batch_idx)
         return p_batch_idx
 
@@ -159,6 +165,36 @@ class sample_dataloader(object):
         self.seed = seed
         if self.seed != None:
             random.seed(self.seed)
+
+
+class MyDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+    def __len__(self):
+        return len(self.data)
+
+
+class memory_fn(object):
+
+    def __init__(self, id2sent):
+        self.id2sent = id2sent
+
+    def collect_fn(self, batch_data):
+        labels = []
+        tokens_id = []
+        tokens = []
+        for ins in batch_data:
+            labels.append(torch.tensor(ins[-1]))
+            tokens_id.append(torch.tensor(ins[0]))
+            tokens.append(torch.tensor(self.id2sent[ins[0]]))
+        labels = torch.stack(labels, dim=0)
+        tokens = torch.stack(tokens, dim=0)
+        tokens_id = torch.stack(tokens_id, dim=0)
+        return (labels, tokens, tokens_id)
 
 
 class data_sampler(object):
@@ -206,6 +242,7 @@ class data_sampler(object):
     def __next__(self):
 
         if self.batch == self.task_length:
+            self.batch == 0
             raise StopIteration()
 
         indexs = self.shuffle_index[self.config.rel_per_task * self.batch: self.config.rel_per_task * (self.batch + 1)]

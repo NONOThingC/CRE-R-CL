@@ -22,6 +22,8 @@ import torch.nn as nn
 import torch.optim as optim
 import json
 import pickle
+
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 from argparse import ArgumentParser
@@ -35,7 +37,7 @@ from model.contrastive_network.contrastive_network import ContrastiveNetwork
 
 from utils import outputer, batch2device
 
-from Sampler.sample_dataloader import sample_dataloader, data_sampler
+from Sampler.sample_dataloader import sample_dataloader, data_sampler, MyDataset, memory_fn
 from data_loader import get_data_loader
 
 
@@ -91,7 +93,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
             batch_avg_acc = batch_cum_acc / (batch_ind + 1)
 
             # accuracy calculation end
-            batch_print_format = "\r Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
+            batch_print_format = "\rContrastive Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
             # batch logger and print start
             print(batch_print_format.format(
                 ep + 1,
@@ -144,9 +146,12 @@ def contrastive_loss(hidden, labels):
     # batch_size = hidden1.shape[0]
     # hidden1_large = hidden1
     # hidden2_large = hidden2
-    logsoftmax = nn.LogSoftmax(dim=-1)
 
+    logsoftmax = nn.LogSoftmax(dim=-1)
     return -(logsoftmax(hidden) * labels).sum() / labels.sum()
+
+    # logsigmoid=nn.LogSigmoid()
+    # return (-logsigmoid(hidden)*labels-(1-logsigmoid(hidden))*(1-labels)).sum()/(labels.shape[0]*labels.shape[1])
 
 
 def compute_jsd_loss(m_input):
@@ -229,7 +234,6 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
                     k -= 1
     return memory
 
-
 def train_first(config, encoder, dropout_layer, classifier, training_data):
     data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
     epochs = config.train_epoch
@@ -237,7 +241,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
     dropout_layer.train()
     classifier.train()
 
-    criterion = nn.CrossEntropyLoss(reduction='sum')
+    criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam([
         {'params': encoder.parameters(), 'lr': 0.00001},
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
@@ -281,22 +285,8 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
 
             out_std_mask = out_std_mask.expand((config.f_pass, out_std_mask.shape[0], -1))  # m B C
             max_idx = torch.argmax(out_prob, dim=-1)  # m,B
+
             m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
-            labels_mask = torch.zeros_like(out_std_mask).scatter_(-1, m_labels.view(m_labels.shape[0], -1, 1),
-                                                                  1)  # m,B,C
-            preds_mask = torch.zeros_like(out_std_mask).scatter_(-1, max_idx.view(max_idx.shape[0], -1, 1), 1)  # m,B,C
-
-            # slt_mask=out_std_mask.sum(dim=-1) > 0 #m B
-            p_mask = labels_mask * preds_mask * out_std_mask  # m,B,C
-            n_mask = ~labels_mask * preds_mask * out_std_mask  # m,B,C #没预测对且预测值类别的不确定度很高
-            # torch.index_select(x, 0, indices)
-            p_index = (p_mask.sum(dim=-1) > 0)  # m B
-            n_index = (n_mask.sum(dim=-1) > 0)  # m B
-
-            p_labels, n_labels = m_labels[p_index], m_labels[n_index]
-            p_logits, n_logits = logits_all[p_index], logits_all[n_index]
-            slt_labels = torch.cat([p_labels, n_labels], dim=0)
-            slt_logits = torch.cat([p_logits, n_logits], dim=0)
 
             # slt_labels=m_labels[(out_std_mask.sum(dim=-1)>0)] #对吗？
 
@@ -306,11 +296,13 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
             # batch_p = torch.index_select(m_labels, 0, p_index)
 
             # labels=labels*out_std_mask
-            loss1 = criterion(slt_logits, slt_labels)
+            # loss1 = criterion(slt_logits, slt_labels)
+            loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
             # logits_all.requires_grad_()
             # for i in range(config.f_pass):
             #     loss1 += criterion(logits_all[i][out_std_mask], labels)
-            loss2 = compute_jsd_loss(slt_logits)  # ??
+            # loss2 = compute_jsd_loss(slt_logits)
+            loss2 = compute_jsd_loss(logits_all)
             loss = loss1 + loss2
             loss.backward()
             losses.append(loss.item())
@@ -319,14 +311,14 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
             # torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
             optimizer.step()
 
-            acc=(torch.argmax(slt_logits, dim=-1) == slt_labels).sum()/(config.f_pass*len(labels))
-
+            # acc=(torch.argmax(slt_logits, dim=-1) == slt_labels).sum()/(config.f_pass*len(labels))
+            acc = (torch.argmax(logits_all, dim=-1) == m_labels).sum() / (config.f_pass * len(labels))
             batch_cum_loss += loss
             batch_cum_acc += acc
 
             batch_avg_loss = batch_cum_loss / (step + 1)
             batch_avg_acc = batch_cum_acc / (step + 1)
-            batch_print_format = "\r Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
+            batch_print_format = "\rFirst Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
             # batch logger and print start
             print(batch_print_format.format(
                 epoch_i + 1,
@@ -345,6 +337,22 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
             if epoch_i == epochs - 1:
 
                 with torch.no_grad():
+                    labels_mask = torch.zeros_like(out_std_mask).scatter_(-1, m_labels.view(m_labels.shape[0], -1, 1),
+                                                                          1)  # m,B,C
+                    preds_mask = torch.zeros_like(out_std_mask).scatter_(-1, max_idx.view(max_idx.shape[0], -1, 1),
+                                                                         1)  # m,B,C
+
+                    # slt_mask=out_std_mask.sum(dim=-1) > 0 #m B
+                    p_mask = labels_mask * preds_mask * out_std_mask  # m,B,C
+                    n_mask = ~labels_mask * preds_mask * out_std_mask  # m,B,C #没预测对且预测值类别的不确定度很高
+                    # torch.index_select(x, 0, indices)
+                    p_index = (p_mask.sum(dim=-1) > 0)  # m B
+                    n_index = (n_mask.sum(dim=-1) > 0)  # m B
+
+                    p_labels, n_labels = m_labels[p_index], m_labels[n_index]
+                    p_logits, n_logits = logits_all[p_index], logits_all[n_index]
+                    slt_labels = torch.cat([p_labels, n_labels], dim=0)
+                    slt_logits = torch.cat([p_logits, n_logits], dim=0)
                     # id2sent.extend(tokens.cpu())
                     # index range:[step * data_loader.batch_size + id,step * data_loader.batch_size + len(tokens))
                     m_tokens_ids = tokens_id.expand((config.f_pass, tokens_id.shape[0]))  # m,B
@@ -387,6 +395,75 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
     #                     result[labels[id]].append(mid)
 
     return ret_d
+
+
+def train_last(config, encoder, dropout_layer, classifier, data_loader):
+    epochs = config.train_epoch
+    encoder.train()
+    dropout_layer.train()
+    classifier.train()
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam([
+        {'params': encoder.parameters(), 'lr': 0.00001},
+        {'params': dropout_layer.parameters(), 'lr': 0.00001},
+        {'params': classifier.parameters(), 'lr': 0.001}
+    ])
+
+    for epoch_i in range(epochs):
+        losses = []
+        batch_cum_loss, batch_cum_acc = 0., 0.
+        t_ep = time.time()
+        for step, (labels, tokens, _) in enumerate(data_loader):
+            t_batch = time.time()
+            optimizer.zero_grad()
+            logits_all = []
+
+            tokens = tokens.to(config.device)
+            labels = labels.to(config.device)
+            reps = encoder(tokens)
+
+            for _ in range(config.f_pass):
+                output, _ = dropout_layer(reps)
+
+                logits = classifier(output)
+                logits_all.append(logits)
+
+            logits_all = torch.stack(logits_all)
+
+            m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
+
+            loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
+
+            loss2 = compute_jsd_loss(logits_all)
+            loss = loss1 + loss2
+            loss.backward()
+            losses.append(loss.item())
+            # torch.nn.utils.clip_grad_norm_(encoder.parameters(), config.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(dropout_layer.parameters(), config.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
+            optimizer.step()
+
+            acc = (torch.argmax(logits_all, dim=-1) == m_labels).sum() / (config.f_pass * len(labels))
+            batch_cum_loss += loss
+            batch_cum_acc += acc
+
+            batch_avg_loss = batch_cum_loss / (step + 1)
+            batch_avg_acc = batch_cum_acc / (step + 1)
+            batch_print_format = "\rMemory Refine Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
+            # batch logger and print start
+            print(batch_print_format.format(
+                epoch_i + 1,
+                config.train_epoch,
+                step + 1,
+                len(data_loader),
+                batch_avg_loss,
+                batch_avg_acc,
+                optimizer.param_groups[0]['lr'],
+                time.time() - t_batch,
+                time.time() - t_ep,
+            ),
+                end="")
 
 
 def transfer_to_device(list_ins, device):
@@ -647,6 +724,39 @@ def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, 
     return correct / n
 
 
+def evaluate_contrastive_model(config, ContrastiveNetwork, memory, test_data, seen_relations):
+    testdata_loader = get_data_loader(config, test_data, batch_size=config.K)
+    ContrastiveNetwork.eval()
+
+    n = len(test_data)
+    correct = 0
+    # cum_acc = 0
+    softmax = nn.Softmax(dim=-1)
+    for step, (labels, tokens, tokens_id) in enumerate(testdata_loader):
+        results = collections.defaultdict(int)
+        for cluster_labels, ins_list in memory.items():
+            batch_emb = []
+            for _, ins in ins_list:
+                batch_emb.append(ins[1])
+
+            labels = labels.to(config.device)
+            batch_emb = torch.stack(batch_emb, dim=0).to(config.device)
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+
+            logits_aa = ContrastiveNetwork(tokens, batch_emb, comparison=torch.ones(len(labels), len(labels)))
+            predict_matrix = softmax(logits_aa) > 0.5
+            torch.sum(predict_matrix, )
+
+            seen_relation_ids = [rel2id[relation] for relation in seen_relations]
+            seen_sim = logits[:, seen_relation_ids].cpu().data.numpy()
+            max_smi = np.max(seen_sim, axis=1)
+
+            label_smi = logits[:, labels].cpu().data.numpy()
+
+            if label_smi >= max_smi:
+                correct += 1
+    return correct / n
+
 if __name__ == '__main__':
 
     parser = ArgumentParser(
@@ -710,8 +820,6 @@ if __name__ == '__main__':
             sampler):
 
             print(current_relations)
-            if steps == 3:
-                break
             temp_mem = {}
             temp_protos = []
             # for relation in seen_relations:
@@ -733,7 +841,7 @@ if __name__ == '__main__':
             ctst_dload = sample_dataloader(quadruple=quads, memory=memory, id2sent=id2sentence, config=config,
                                            seed=config.seed + i * 100)
             optimizer = optim.Adam([
-                {'params': contrastive_network.parameters(), 'lr': 1e-5}
+                {'params': contrastive_network.parameters(), 'lr': 9e-5}
             ])
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                         step_size=decay_steps,
@@ -748,7 +856,21 @@ if __name__ == '__main__':
 
             # memory={}
             #
-            select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial, memory)
+            memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial, memory)
+            memory_ins = []
+            for ins_list in memory.values():
+                for _, ins in ins_list:
+                    memory_ins.append(ins)
+
+            memory_dataloader = DataLoader(
+                MyDataset(memory_ins),
+                batch_size=config.batch_size,
+                shuffle=True,
+                num_workers=0,
+                drop_last=False,
+                collate_fn=memory_fn(id2sent=id2sentence).collect_fn,
+            )
+            train_last(config, encoder, dropout_layer, classifier, memory_dataloader)
             test_data_1 = []
             for relation in current_relations:
                 test_data_1 += test_data[relation]
@@ -756,7 +878,8 @@ if __name__ == '__main__':
             test_data_2 = []
             for relation in seen_relations:
                 test_data_2 += historic_test_data[relation]
-            cur_acc=evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
+
+            cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
             total_acc=evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
             # print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
             print(f'current test acc:{cur_acc}')
