@@ -44,7 +44,7 @@ from data_loader import get_data_loader
 def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator):
     train_dataloader = dataloader
     softmax = nn.Softmax()
-    for ep in range(config.train_epoch):
+    for ep in range(config.contrast_epoch):
         ## train
         model.train()
         t_ep = time.time()
@@ -146,7 +146,6 @@ def contrastive_loss(hidden, labels):
     # batch_size = hidden1.shape[0]
     # hidden1_large = hidden1
     # hidden2_large = hidden2
-
     logsoftmax = nn.LogSoftmax(dim=-1)
     return -(logsoftmax(hidden) * labels).sum() / labels.sum()
 
@@ -226,7 +225,7 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
                 memory_list = memory[slt_labels[i].item()]
                 k = len(memory_list)
                 heapq.heappush(memory_list,
-                               (-slt_unct[i].item(), (
+                               (slt_unct[i].item(), (
                                    slt_tokens_ids[i].tolist(), slt_embeddings[i].cpu(), slt_preds[i].item(),
                                    slt_labels[i].item())))
                 while k > config.K:
@@ -287,6 +286,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data):
             max_idx = torch.argmax(out_prob, dim=-1)  # m,B
 
             m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
+
 
             # slt_labels=m_labels[(out_std_mask.sum(dim=-1)>0)] #对吗？
 
@@ -464,6 +464,7 @@ def train_last(config, encoder, dropout_layer, classifier, data_loader):
                 time.time() - t_ep,
             ),
                 end="")
+
 
 
 def transfer_to_device(list_ins, device):
@@ -724,38 +725,37 @@ def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, 
     return correct / n
 
 
-def evaluate_contrastive_model(config, ContrastiveNetwork, memory, test_data, seen_relations):
+def evaluate_contrastive_model(config, ContrastiveNetwork, memory, test_data):
     testdata_loader = get_data_loader(config, test_data, batch_size=config.K)
     ContrastiveNetwork.eval()
-
-    n = len(test_data)
-    correct = 0
-    # cum_acc = 0
-    softmax = nn.Softmax(dim=-1)
+    cum_right = 0
+    cum_len = 0
+    mem_id2label = list(memory.keys())
     for step, (labels, tokens, tokens_id) in enumerate(testdata_loader):
-        results = collections.defaultdict(int)
-        for cluster_labels, ins_list in memory.items():
+        results = torch.zeros(len(tokens), len(memory), device=config.device)  # B1 B2
+
+        for ins_list in zip(*memory.values()):
             batch_emb = []
             for _, ins in ins_list:
                 batch_emb.append(ins[1])
 
-            labels = labels.to(config.device)
-            batch_emb = torch.stack(batch_emb, dim=0).to(config.device)
-            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            labels = labels.to(config.device)  # B1
+            batch_emb = torch.stack(batch_emb, dim=0).to(config.device)  # B2*H
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)  # B1*H
 
-            logits_aa = ContrastiveNetwork(tokens, batch_emb, comparison=torch.ones(len(labels), len(labels)))
-            predict_matrix = softmax(logits_aa) > 0.5
-            torch.sum(predict_matrix, )
+            logits_aa = ContrastiveNetwork(tokens, batch_emb, comparison=torch.ones(len(tokens), len(memory),
+                                                                                    device=config.device))  # B1*B2
+            predict_matrix = torch.argmax(logits_aa, dim=-1)  # B1
+            for j, i in enumerate(predict_matrix.tolist()):
+                results[j][i] += 1
+        preds = torch.stack(
+            [torch.tensor(mem_id2label[i], device=config.device) for i in torch.argmax(results, dim=-1)], dim=-1)  # B1
+        # torch.gather(results)
+        cum_right += (labels == preds).sum()
+        cum_len += len(preds)
 
-            seen_relation_ids = [rel2id[relation] for relation in seen_relations]
-            seen_sim = logits[:, seen_relation_ids].cpu().data.numpy()
-            max_smi = np.max(seen_sim, axis=1)
-
-            label_smi = logits[:, labels].cpu().data.numpy()
-
-            if label_smi >= max_smi:
-                correct += 1
-    return correct / n
+    print(f"Contrastive acc is {cum_right / cum_len}")
+    return cum_right / cum_len
 
 if __name__ == '__main__':
 
@@ -840,8 +840,12 @@ if __name__ == '__main__':
 
             ctst_dload = sample_dataloader(quadruple=quads, memory=memory, id2sent=id2sentence, config=config,
                                            seed=config.seed + i * 100)
+
+            memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
+                                      memory)  # 须在采样之后，否则本轮中会有memory
+
             optimizer = optim.Adam([
-                {'params': contrastive_network.parameters(), 'lr': 9e-5}
+                {'params': contrastive_network.parameters(), 'lr': 4e-5}
             ])
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                         step_size=decay_steps,
@@ -856,21 +860,21 @@ if __name__ == '__main__':
 
             # memory={}
             #
-            memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial, memory)
-            memory_ins = []
-            for ins_list in memory.values():
-                for _, ins in ins_list:
-                    memory_ins.append(ins)
 
-            memory_dataloader = DataLoader(
-                MyDataset(memory_ins),
-                batch_size=config.batch_size,
-                shuffle=True,
-                num_workers=0,
-                drop_last=False,
-                collate_fn=memory_fn(id2sent=id2sentence).collect_fn,
-            )
-            train_last(config, encoder, dropout_layer, classifier, memory_dataloader)
+            # memory_ins = []
+            # for  ins_list in memory.values():
+            #     for _, ins in ins_list:
+            #         memory_ins.append(ins)
+
+            # memory_dataloader = DataLoader(
+            #     MyDataset(memory_ins),
+            #     batch_size=config.batch_size,
+            #     shuffle=True,
+            #     num_workers=0,
+            #     drop_last=False,
+            #     collate_fn=memory_fn(id2sent=id2sentence).collect_fn,
+            # )
+            # train_last(config, encoder, dropout_layer, classifier, memory_dataloader)
             test_data_1 = []
             for relation in current_relations:
                 test_data_1 += test_data[relation]
@@ -880,7 +884,14 @@ if __name__ == '__main__':
                 test_data_2 += historic_test_data[relation]
 
             cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
-            total_acc=evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
+            total_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
             # print(f"Test acc is {evaluate_no_mem_model(config, encoder, dropout_layer, classifier, test_data)}")
-            print(f'current test acc:{cur_acc}')
-            print(f'history test acc:{total_acc}')
+
+            print(f'First model current test acc:{cur_acc}')
+            print(f'First model history test acc:{total_acc}')
+
+            cont_cur_acc = evaluate_contrastive_model(config, contrastive_network, memory, test_data_1)
+            total_cur_acc = evaluate_contrastive_model(config, contrastive_network, memory, test_data_2)
+
+            print(f'Contrastive model current test acc:{cont_cur_acc}')
+            print(f'Contrastive model history test acc:{total_cur_acc}')

@@ -101,8 +101,8 @@ class Dropout_Layer(base_model):
 
     def forward(self, input):
         # input :[B,2H]
-        output1 = self.linear1(input)
-        output = F.relu(output1)
-        output = self.drop(output)
+        output = self.linear1(input)
+        output1 = F.relu(output)
+        output = self.drop(output1)
         output = self.norm_layer(output)
         return output, output1

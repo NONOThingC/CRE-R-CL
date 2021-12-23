@@ -12,8 +12,10 @@ class sample_dataloader(object):
     def __init__(self, quadruple, memory, id2sent, config=None, seed=None):
         self.quadruple = quadruple
         self.id2sent = id2sent
-        self.data_idx = self.get_contrastive_data(memory, config.batch_size)
+        self.memory = memory
+
         self.config = config
+        self.data_idx = self.get_contrastive_data(self.config.batch_size)
         self._ix = 0
 
         self.seed = seed
@@ -31,6 +33,7 @@ class sample_dataloader(object):
             l_idx, is_p_data = self.data_idx[self._ix]
         except IndexError:
             # Possibly reset `self._ix`?
+            self.data_idx = self.get_contrastive_data(self.config.batch_size)
             self._ix = 0
             raise StopIteration
 
@@ -78,7 +81,11 @@ class sample_dataloader(object):
         if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
             raise Exception('labels and comparison not matched')
 
-    def get_contrastive_data(self, memory, batch_size):
+    def get_different_cluster_data(self, memory, batch_size):
+
+        pass
+
+    def get_contrastive_data(self, batch_size):
         """
         From
         1. Positive and negative embeddings in one sentence.
@@ -111,15 +118,17 @@ class sample_dataloader(object):
         sent_id2ins_id = collections.defaultdict(list)
         count = 0
 
-        for all_items in memory.values():
-            for _, quad_ins in all_items:
-                self.quadruple.append(quad_ins)
-
+        # # memory update
+        # for all_items in self.memory.values():
+        #     for _, quad_ins in all_items:
+        #         self.quadruple.append(quad_ins)
+        # 得到句子序号到quadruple序号的映射，i是quadruple序号
         for i, quad in enumerate(self.quadruple):
             sent_id2ins_id[quad[0]].append(i)
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
 
+        # 取簇间正向量形成训练数据
         p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
         # negative
         for ins in sent_id2ins_id.values():
@@ -135,9 +144,33 @@ class sample_dataloader(object):
                     print(f"Over sampling num:{count}")
                     pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
         p_batch_idx.extend(pn_batch_idx)
+        # memory
+
+        # memory update
+        start_index = len(self.quadruple)
+        len_mem = 0
+        for all_items in self.memory.values():
+            for _, quad_ins in all_items:
+                self.quadruple.append(quad_ins)
+                len_mem += 1
+
+        mem_pool = list(range(start_index, start_index + len_mem))
+
+        pool_num = batch_size // 2 + 1 if batch_size & 1 else batch_size // 2
+        # 取簇间正向量形成训练数据
+        for i in range(2):
+            if len(mem_pool) > pool_num:
+                p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size // 2)]
+                for i in self.multi_sample_no_replace(p_idx, batch_size // 2):
+                    i.extend(np.random.choice(a=mem_pool, size=pool_num, replace=False).tolist())
+                    p_batch_idx.append((i, 1))
 
         random.shuffle(p_batch_idx)
+
         return p_batch_idx
+
+    def choice_object(self, object_list, num):
+        pass
 
     def multi_sample_no_replace(self, list_collection, n, shuffle=True):
         if shuffle:
@@ -165,7 +198,6 @@ class sample_dataloader(object):
         self.seed = seed
         if self.seed != None:
             random.seed(self.seed)
-
 
 class MyDataset(Dataset):
     def __init__(self, data):
@@ -196,7 +228,6 @@ class memory_fn(object):
         tokens_id = torch.stack(tokens_id, dim=0)
         return (labels, tokens, tokens_id)
 
-
 class data_sampler(object):
 
     def __init__(self, config=None, seed=None):
@@ -213,7 +244,7 @@ class data_sampler(object):
         self.seed = seed
         if self.seed != None:
             self.set_seed(self.seed)
-        self.shuffle_index = list(range(len(self.id2rel)))
+        self.shuffle_index = list(range(len(self.id2rel)))  # rel id
         random.shuffle(self.shuffle_index)
         self.shuffle_index = np.argsort(self.shuffle_index)
 
@@ -245,7 +276,8 @@ class data_sampler(object):
             self.batch == 0
             raise StopIteration()
 
-        indexs = self.shuffle_index[self.config.rel_per_task * self.batch: self.config.rel_per_task * (self.batch + 1)]
+        indexs = self.shuffle_index[
+                 self.config.rel_per_task * self.batch: self.config.rel_per_task * (self.batch + 1)]  #每个任务出现的id
         self.batch += 1
 
         current_relations = []
