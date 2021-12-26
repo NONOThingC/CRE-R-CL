@@ -9,13 +9,17 @@ from torch.utils.data import Dataset
 
 class sample_dataloader(object):
 
-    def __init__(self, quadruple, memory, id2sent, config=None, seed=None):
+    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=1):
         self.quadruple = quadruple
         self.id2sent = id2sent
         self.memory = memory
-
         self.config = config
-        self.data_idx = self.get_contrastive_data(self.config.batch_size)
+        self.FUN_CODE = FUN_CODE
+        if FUN_CODE == 1:
+            self._ini_before_get_data()
+            self.data_idx = self.get_data(self.config.batch_size)
+        if FUN_CODE == 2:
+            self.data_idx = self.get_contrastive_data(self.config.batch_size)
         self._ix = 0
 
         self.seed = seed
@@ -29,61 +33,218 @@ class sample_dataloader(object):
         return self
 
     def __next__(self):
-        try:
-            l_idx, is_p_data = self.data_idx[self._ix]
-        except IndexError:
-            # Possibly reset `self._ix`?
-            self.data_idx = self.get_contrastive_data(self.config.batch_size)
-            self._ix = 0
-            raise StopIteration
+        if self.FUN_CODE == 2:
+            try:
+                l_idx, is_p_data = self.data_idx[self._ix]
+            except IndexError:
+                self.data_idx = self.get_contrastive_data(self.config.batch_size)
+                self._ix = 0
+                raise StopIteration
 
-        batch_all = [self.quadruple[i] for i in l_idx]
-        sent_inp, emb_inp, preds, trues = [], [], [], []
-        for (sent_id, emb, pred, true) in batch_all:
-            sent_inp.append(torch.tensor(self.id2sent[sent_id]).int())
-            emb_inp.append(emb)
-            preds.append(pred)
-            trues.append(true)
-        labels = np.zeros(shape=(len(trues), len(trues)))
-        if is_p_data:
-            comparison = torch.ones((len(trues), len(trues)))
-            for i in range(1, len(trues)):
-                for j in range(0, i):
-                    labels[i][j] = (trues[i] == trues[j])
-        else:
-            comparison = torch.ones((len(trues), len(trues)))
-            for i in range(1, len(trues)):
-                for j in range(0, i):
-                    labels[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) * (trues[i] == trues[j])
-                    # AB+AB^C+A^BC
-                    comparison[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) or (
-                            (preds[i] == trues[i]) * (preds[j] != trues[j]) + (preds[i] != trues[i]) * (
-                            preds[j] == trues[j])) * (trues[i] == trues[j])
-        labels += labels.T
-        for i in range(len(trues)):
-            labels[i][i] = (preds[i] == trues[i])
-        labels = torch.IntTensor(labels)
+            batch_all = [self.quadruple[i] for i in l_idx]
+            sent_inp, emb_inp, preds, trues = [], [], [], []
+            for (sent_id, emb, pred, true) in batch_all:
+                sent_inp.append(torch.tensor(self.id2sent[sent_id]).int())
+                emb_inp.append(emb)
+                preds.append(pred)
+                trues.append(true)
+            labels = np.zeros(shape=(len(trues), len(trues)))
+            if is_p_data:
+                comparison = torch.ones((len(trues), len(trues)))
+                for i in range(1, len(trues)):
+                    for j in range(0, i):
+                        labels[i][j] = (trues[i] == trues[j])
+            else:
+                comparison = torch.ones((len(trues), len(trues)))
+                for i in range(1, len(trues)):
+                    for j in range(0, i):
+                        labels[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) * (trues[i] == trues[j])
+                        # AB+AB^C+A^BC
+                        comparison[i][j] = (preds[i] == trues[i]) * (preds[j] == trues[j]) or (
+                                (preds[i] == trues[i]) * (preds[j] != trues[j]) + (preds[i] != trues[i]) * (
+                                preds[j] == trues[j])) * (trues[i] == trues[j])
+            labels += labels.T
+            for i in range(len(trues)):
+                labels[i][i] = (preds[i] == trues[i])
+            labels = torch.IntTensor(labels)
 
-        self.verify_metrix(labels, comparison)
-        sent_inp = torch.stack(sent_inp)
-        emb_inp = torch.stack(emb_inp)
-        self._ix += 1
-        return sent_inp, emb_inp, labels, comparison
+            self.verify_metrix(labels, comparison)
+            sent_inp = torch.stack(sent_inp)
+            emb_inp = torch.stack(emb_inp)
+            self._ix += 1
+            return sent_inp, emb_inp, labels, comparison
+        elif self.FUN_CODE == 1:
+            try:
+                batch_sent, batch_emb = self.data_idx[self._ix]
+            except IndexError:
+                self.data_idx = self.get_data(self.config.batch_size)
+                self._ix = 0
+                raise StopIteration
+
+            sent_batch = [self.quadruple[i] for i in batch_sent]
+            emb_batch = [self.quadruple[i] for i in batch_emb]
+            sent_inp, emb_inp, preds, trues = [], [], [], []
+            for (sent_id, _, _, true) in sent_batch:
+                sent_inp.append(torch.tensor(self.id2sent[sent_id]).int())
+                trues.append(true)  # B1
+            for (_, emb, _, true) in emb_batch:
+                emb_inp.append(emb)
+                preds.append(true)  # B2
+            trues = torch.tensor(trues)
+            preds = torch.tensor(preds)
+            comparison = torch.ones((trues.shape[0], preds.shape[0]))
+            trues = trues.expand((preds.shape[0], trues.shape[0])).transpose(-1, -2)
+            preds = preds.expand((trues.shape[0], preds.shape[0]))
+            labels = (trues == preds).int()
+
+            self.verify_metrix(labels, comparison)
+            sent_inp = torch.stack(sent_inp)
+            emb_inp = torch.stack(emb_inp)
+            self._ix += 1
+            return sent_inp, emb_inp, labels, comparison
 
     def verify_metrix(self, labels, comparison):
-        """
-        labels和comparison是两个相同的方阵，设计实现以下功能：
-        检测以下情况，不满足时候抛出错误：
-        1. labels为1时comparison为True(1)
-        2. comparsion为0时labels为0
-        要求尽量使用矩阵操作
-        """
-        if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
-            raise Exception('labels and comparison not matched')
 
-    def get_different_cluster_data(self, memory, batch_size):
+        if self.FUN_CODE == 2:
+            """
+                    labels和comparison是两个相同的方阵，设计实现以下功能：
+                    检测以下情况，不满足时候抛出错误：
+                    1. labels为1时comparison为True(1)
+                    2. comparsion为0时labels为0
+                    要求尽量使用矩阵操作
+            """
+            if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
+                raise Exception('labels and comparison not matched')
+        elif self.FUN_CODE == 1:
+            """
+            检测labels每行是不是有且仅有一个1
+            """
+            if (torch.sum(labels, dim=-1) == 1).sum() != labels.shape[0]:
+                print(labels)
+                print(torch.sum(labels, dim=-1) == 1)
+                print((torch.sum(labels, dim=-1) == 1).sum())
+                raise Exception('labels and comparison not matched')
 
-        pass
+    def get_mem_data(self, mem_cluster2quad_p, num_sent):
+        for i in mem_cluster2quad_p.values():
+            random.shuffle(i)
+        a = self._get_mem_data(mem_cluster2quad_p, num_sent)
+        while 1:
+            try:
+                res = next(a)
+            except StopIteration:
+                for i in mem_cluster2quad_p.values():
+                    random.shuffle(i)
+                a = self._get_mem_data(mem_cluster2quad_p, num_sent)
+                res = next(a)
+            yield res
+
+    def _get_mem_data(self, mem_cluster2quad_p, num_sent):
+        for quad_id in zip(*mem_cluster2quad_p.values()):
+            # yield (quad,quad[:num_sent])#emb and sent poisition in quadruple
+            yield quad_id  # emb and sent poisition in quadruple
+
+    def _ini_before_get_data(self):
+        # statistic
+        # 得到句子序号到quadruple序号的映射，i是quadruple序号
+        sent_id2quad_id = collections.defaultdict(list)
+        self.cluster2quad_p = collections.defaultdict(list)
+        self.sent_cluster2quad_p = collections.defaultdict(list)
+        self.mem_cluster2quad_p = collections.defaultdict(list)
+        for i, quad in enumerate(self.quadruple):
+            sent_id2quad_id[quad[0]].append(i)
+            if quad[-1] == quad[-2]:
+                self.cluster2quad_p[quad[-1]].append(i)
+
+        for quad_ids in sent_id2quad_id.values():
+            self.sent_cluster2quad_p[self.quadruple[quad_ids[0]][-1]].append(
+                quad_ids[0])  # 建立句子类别到quadruple id的唯一映射，不会有重复句子
+        # memory update
+        start_index = len(self.quadruple)
+        len_mem = 0
+
+        for mem_cluster, all_items in self.memory.items():
+            for _, quad_ins in all_items:
+                self.quadruple.append(quad_ins)
+                self.mem_cluster2quad_p[mem_cluster].append(start_index + len_mem)
+                len_mem += 1
+
+    def get_data(self, batch_size):
+        # 为各个簇统计向量位置，选一个簇类，如果有memory，在memory中找一个正向量，此簇和memory此簇中所有句子形成池，池中采样句子
+
+        # # memory update
+        # for all_items in self.memory.values():
+        #     for _, quad_ins in all_items:
+        #         self.quadruple.append(quad_ins)
+        num_sent = 2
+        mem_gen = self.get_mem_data(self.mem_cluster2quad_p, num_sent=num_sent)  # 每次返回各个类的quad_id,结束时候自动shuffle
+        task_cluster = list(self.cluster2quad_p.keys())
+        random.shuffle(task_cluster)
+        batch_data = []
+        count = 0
+        for cluster in task_cluster:
+            # choose this cluster,get all sent and every emb
+            cur_clu_emb_all = self.cluster2quad_p[cluster]
+            cur_clu_sent_all = self.sent_cluster2quad_p[cluster]
+            if (batch_size - num_sent) > len(cur_clu_sent_all):
+                count += 1
+                print(f"Sentence oversampling {count} times,sent:{cluster},num:{len(cur_clu_sent_all)}.")
+            cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent, shuffle=True)
+            len_sent_batch = len(cur_all_sent_batch)
+            i = 0
+
+            # for  emb in cur_clu_emb_all:
+            for control, emb in enumerate(cur_clu_emb_all):
+                sent_batch = []
+                emb_batch = []
+                if control & 1:
+                    continue
+                # if control>2:
+                #     break
+                if len(self.mem_cluster2quad_p):
+                    mem_emb = next(mem_gen)
+                    # 数据加入正句子，加入正向量，采样此簇所有句子
+                    sent_batch.extend(mem_emb[:num_sent])  # 采样mem中句子，采样num_sent个
+                    if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
+                        sent_batch.extend(cur_all_sent_batch[i])
+                    else:
+                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent,
+                                                                          shuffle=True)
+                        len_sent_batch = len(cur_all_sent_batch)
+                        i = 0
+                        sent_batch.extend(cur_all_sent_batch[i])
+                    # memory取正句子和向量，采样此簇所有句子
+                    emb_batch.append(emb)
+                    emb_batch.extend(mem_emb)
+                    for ot_cluster in task_cluster:
+                        if ot_cluster != cluster:
+                            emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=2))
+                    i += 1
+                    # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
+                    random.shuffle(sent_batch)
+                    random.shuffle(emb_batch)
+                    batch_data.append((sent_batch, emb_batch))  # batch_size,1+exist_C+(task_C-1)*2
+                else:  # mem is empty
+                    if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
+                        sent_batch.extend(cur_all_sent_batch[i])
+                    else:
+                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size,
+                                                                          shuffle=True)
+                        len_sent_batch = len(cur_all_sent_batch)
+                        i = 0
+                        sent_batch.extend(cur_all_sent_batch[i])
+
+                    emb_batch.append(emb)
+
+                    for ot_cluster in task_cluster:
+                        if ot_cluster != cluster:
+                            emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=4))
+                    i += 1
+                    # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
+                    random.shuffle(sent_batch)
+                    random.shuffle(emb_batch)
+                    batch_data.append((sent_batch, emb_batch))  # batch_size,1+(task_C-1)*4
+        return batch_data
 
     def get_contrastive_data(self, batch_size):
         """
@@ -95,27 +256,13 @@ class sample_dataloader(object):
         """
         # 根据句子簇分类,得到分好类的变量假设是 cluster2sentences
 
-        # import pandas as pd
-        # col_name=["sent_id", "embedding", "pred_id", "true_id"]
-        # df=pd.DataFrame(zip(*quadruple),columns=col_name)
-        # df["is_p"]=(df["pred_id"]==df["true_id"])
-        # df["is_n"] = (df["pred_id"] != df["true_id"])
-        # # 1. Positive and negative embeddings in one sentence
-        # stat=df.groupby("sent_id")[["is_p"]].count().reset_index().describe()
-        # stat_n = df.groupby("sent_id")[["is_n"]].sum().reset_index().describe()
-        # print(f"Median of same sentence sample:{stat.loc['50%']}, min of same sentence sample:{stat.loc['min']}\nMedian of negative sample:{stat_n.loc['50%']}, min of same sentence sample:{stat_n.loc['min']}")
-        #
-        # p_pool = df.loc[df["is_p"] == True].values.tolist()
-        #
-        # # get positive negetive pool
-        # pt_pool = sorted(quadruple, key=lambda x: x[0]) if batch_size < median_num else None
-        # sample by batch
+
 
         # if pt_pool is not None:
         pn_batch_idx = []
         p_idx = []
         p_batch_idx = []  # get positive pool
-        sent_id2ins_id = collections.defaultdict(list)
+        sent_id2quad_id = collections.defaultdict(list)
         count = 0
 
         # # memory update
@@ -124,14 +271,14 @@ class sample_dataloader(object):
         #         self.quadruple.append(quad_ins)
         # 得到句子序号到quadruple序号的映射，i是quadruple序号
         for i, quad in enumerate(self.quadruple):
-            sent_id2ins_id[quad[0]].append(i)
+            sent_id2quad_id[quad[0]].append(i)
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
 
         # 取簇间正向量形成训练数据
         p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
         # negative
-        for ins in sent_id2ins_id.values():
+        for ins in sent_id2quad_id.values():
             n = len(ins) / batch_size
             if n >= 1:
                 for i in self.multi_sample_no_replace(ins, batch_size):
@@ -158,7 +305,7 @@ class sample_dataloader(object):
 
         pool_num = batch_size // 2 + 1 if batch_size & 1 else batch_size // 2
         # 取簇间正向量形成训练数据
-        for i in range(2):
+        for i in range(1):
             if len(mem_pool) > pool_num:
                 p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size // 2)]
                 for i in self.multi_sample_no_replace(p_idx, batch_size // 2):

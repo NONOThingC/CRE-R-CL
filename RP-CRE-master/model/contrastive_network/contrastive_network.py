@@ -30,7 +30,7 @@ class ContrastiveNetwork(base_model):
 
         hidden = F.normalize(hidden, dim=-1, p=2)
         # hidden = torch.linalg.norm(hidden, dim=-1)
-        hidden1, hidden2 = torch.split(hidden, [len(enc_inp), len((proj_inp))], dim=0)
+        hidden1, hidden2 = torch.split(hidden, [len(enc_inp), len(proj_inp)], dim=0)
         logits_aa = torch.matmul(hidden1, torch.transpose(hidden2, -1, -2)) / self.temperature  # B1*B2
-        logits_aa = logits_aa + (comparison == 0) * (-LARGE_NUM)  # mask#B1 * B2
+        logits_aa = logits_aa + (comparison == 0).float() * (-LARGE_NUM)  # mask#B1 * B2
         return logits_aa

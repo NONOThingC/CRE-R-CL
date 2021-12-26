@@ -82,8 +82,8 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
             # grad operation end
 
             # accuracy calculation start
-            acc = ((softmax(hidden) > 0.5) == labels).sum() / comparison.sum()
-
+            # acc = ((softmax(hidden) > 0.5) == labels).sum() / comparison.sum()
+            acc = (torch.argmax(hidden, dim=-1) == torch.argmax(labels, dim=-1)).sum() / hidden.shape[0]
             loss, acc = loss.item(), acc.item()
 
             batch_cum_loss += loss
@@ -835,8 +835,8 @@ if __name__ == '__main__':
                 train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, 2)
             # first model
             quads = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial)
-            with open('quads.pkl', 'wb') as f:
-                pickle.dump(quads, f)
+            # with open('quads.pkl', 'wb') as f:
+            #     pickle.dump(quads, f)
 
             ctst_dload = sample_dataloader(quadruple=quads, memory=memory, id2sent=id2sentence, config=config,
                                            seed=config.seed + i * 100)
@@ -860,6 +860,7 @@ if __name__ == '__main__':
 
             # memory={}
             #
+
 
             # memory_ins = []
             # for  ins_list in memory.values():
