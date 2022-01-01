@@ -95,14 +95,22 @@ class LayerNorm(nn.Module):
 class Dropout_Layer(base_model):
     def __init__(self, config, input_size):
         super(Dropout_Layer, self).__init__()
-        self.norm_layer = LayerNorm(input_size)
-        self.linear1 = nn.Linear(input_size, input_size)
+        # self.norm_layer = LayerNorm(input_size)
+        # self.linear1 = nn.Linear(input_size, input_size)
         self.drop = nn.Dropout(config.drop_out)
+        self.linear_transform = nn.Linear(config.hidden_size * 2, config.output_size, bias=True)
+
+        self.layer_normalization = nn.LayerNorm([config.output_size])
 
     def forward(self, input):
-        # input :[B,2H]
-        output = self.linear1(input)
-        output1 = F.relu(output)
-        output = self.drop(output1)
-        output = self.norm_layer(output)
-        return output, output1
+        output = self.drop(input)
+        output = self.linear_transform(output)
+        output = F.gelu(output)
+        output = self.layer_normalization(output)
+        return output, output
+
+        # output = self.linear1(input)
+        # output = F.gelu(output)
+        # output = self.drop(output)
+        # # output = self.norm_layer(output)
+        # return output, output

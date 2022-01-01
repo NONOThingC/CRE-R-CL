@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 
 class sample_dataloader(object):
 
-    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=1):
+    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=2):
         self.quadruple = quadruple
         self.id2sent = id2sent
         self.memory = memory
@@ -97,7 +97,7 @@ class sample_dataloader(object):
             preds = preds.expand((trues.shape[0], preds.shape[0]))
             labels = (trues == preds).int()
 
-            self.verify_metrix(labels, comparison)
+            # self.verify_metrix(labels, comparison)
             sent_inp = torch.stack(sent_inp)
             emb_inp = torch.stack(emb_inp)
             self._ix += 1
@@ -176,7 +176,7 @@ class sample_dataloader(object):
         # for all_items in self.memory.values():
         #     for _, quad_ins in all_items:
         #         self.quadruple.append(quad_ins)
-        num_sent = 2
+        num_sent = max(1, len(self.mem_cluster2quad_p))
         mem_gen = self.get_mem_data(self.mem_cluster2quad_p, num_sent=num_sent)  # 每次返回各个类的quad_id,结束时候自动shuffle
         task_cluster = list(self.cluster2quad_p.keys())
         random.shuffle(task_cluster)
@@ -186,10 +186,11 @@ class sample_dataloader(object):
             # choose this cluster,get all sent and every emb
             cur_clu_emb_all = self.cluster2quad_p[cluster]
             cur_clu_sent_all = self.sent_cluster2quad_p[cluster]
-            if (batch_size - num_sent) > len(cur_clu_sent_all):
+            # if (batch_size - num_sent) > len(cur_clu_sent_all):
+            if 2 * num_sent > len(cur_clu_sent_all):
                 count += 1
-                print(f"Sentence oversampling {count} times,sent:{cluster},num:{len(cur_clu_sent_all)}.")
-            cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent, shuffle=True)
+                print(f"Sentence oversampling {count} times,sent id:{cluster},num:{len(cur_clu_sent_all)}.")
+            cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, 2 * num_sent, shuffle=True)
             len_sent_batch = len(cur_all_sent_batch)
             i = 0
 
@@ -208,7 +209,7 @@ class sample_dataloader(object):
                     if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
                         sent_batch.extend(cur_all_sent_batch[i])
                     else:
-                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent,
+                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, 2 * num_sent,
                                                                           shuffle=True)
                         len_sent_batch = len(cur_all_sent_batch)
                         i = 0
@@ -218,17 +219,19 @@ class sample_dataloader(object):
                     emb_batch.extend(mem_emb)
                     for ot_cluster in task_cluster:
                         if ot_cluster != cluster:
-                            emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=2))
+                            emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=4))
+                            sent_batch.extend(random.choices(self.sent_cluster2quad_p[ot_cluster], k=1))
                     i += 1
                     # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
                     random.shuffle(sent_batch)
                     random.shuffle(emb_batch)
-                    batch_data.append((sent_batch, emb_batch))  # batch_size,1+exist_C+(task_C-1)*2
+                    batch_data.append((sent_batch,
+                                       emb_batch))  # 句子：num_sent个mem+正类个，向量：其他类*K+一个正类+mem规定采样数 batch_size:(),1+exist_C+(task_C-1)*2
                 else:  # mem is empty
                     if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
                         sent_batch.extend(cur_all_sent_batch[i])
                     else:
-                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size,
+                        cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, 2 * num_sent,
                                                                           shuffle=True)
                         len_sent_batch = len(cur_all_sent_batch)
                         i = 0
@@ -239,12 +242,76 @@ class sample_dataloader(object):
                     for ot_cluster in task_cluster:
                         if ot_cluster != cluster:
                             emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=4))
+                            sent_batch.extend(random.choices(self.sent_cluster2quad_p[ot_cluster], k=1))
                     i += 1
                     # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
                     random.shuffle(sent_batch)
                     random.shuffle(emb_batch)
                     batch_data.append((sent_batch, emb_batch))  # batch_size,1+(task_C-1)*4
         return batch_data
+        # for cluster in task_cluster:
+        #     # choose this cluster,get all sent and every emb
+        #     cur_clu_emb_all = self.cluster2quad_p[cluster]
+        #     cur_clu_sent_all = self.sent_cluster2quad_p[cluster]
+        #     if (batch_size - num_sent) > len(cur_clu_sent_all):
+        #         count += 1
+        #         print(f"Sentence oversampling {count} times,sent:{cluster},num:{len(cur_clu_sent_all)}.")
+        #     cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent, shuffle=True)
+        #     len_sent_batch = len(cur_all_sent_batch)
+        #     i = 0
+        #
+        #     # for  emb in cur_clu_emb_all:
+        #     for control, emb in enumerate(cur_clu_emb_all):
+        #         sent_batch = []
+        #         emb_batch = []
+        #         if control & 1:
+        #             continue
+        #         # if control>2:
+        #         #     break
+        #         if len(self.mem_cluster2quad_p):
+        #             mem_emb = next(mem_gen)
+        #             # 数据加入正句子，加入正向量，采样此簇所有句子
+        #             sent_batch.extend(mem_emb[:num_sent])  # 采样mem中句子，采样num_sent个
+        #             if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
+        #                 sent_batch.extend(cur_all_sent_batch[i])
+        #             else:
+        #                 cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent,
+        #                                                                   shuffle=True)
+        #                 len_sent_batch = len(cur_all_sent_batch)
+        #                 i = 0
+        #                 sent_batch.extend(cur_all_sent_batch[i])
+        #             # memory取正句子和向量，采样此簇所有句子
+        #             emb_batch.append(emb)
+        #             emb_batch.extend(mem_emb)
+        #             for ot_cluster in task_cluster:
+        #                 if ot_cluster != cluster:
+        #                     emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=2))
+        #             i += 1
+        #             # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
+        #             random.shuffle(sent_batch)
+        #             random.shuffle(emb_batch)
+        #             batch_data.append((sent_batch, emb_batch))  # 句子：num_sent个mem+正类个，向量：其他类*K+一个正类+mem规定采样数 batch_size:(),1+exist_C+(task_C-1)*2
+        #         else:  # mem is empty
+        #             if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
+        #                 sent_batch.extend(cur_all_sent_batch[i])
+        #             else:
+        #                 cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size,
+        #                                                                   shuffle=True)
+        #                 len_sent_batch = len(cur_all_sent_batch)
+        #                 i = 0
+        #                 sent_batch.extend(cur_all_sent_batch[i])
+        #
+        #             emb_batch.append(emb)
+        #
+        #             for ot_cluster in task_cluster:
+        #                 if ot_cluster != cluster:
+        #                     emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=4))
+        #             i += 1
+        #             # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
+        #             random.shuffle(sent_batch)
+        #             random.shuffle(emb_batch)
+        #             batch_data.append((sent_batch, emb_batch))  # batch_size,1+(task_C-1)*4
+        # return batch_data
 
     def get_contrastive_data(self, batch_size):
         """
@@ -275,22 +342,23 @@ class sample_dataloader(object):
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
 
-        # 取簇间正向量形成训练数据
-        p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
-        # negative
-        for ins in sent_id2quad_id.values():
-            n = len(ins) / batch_size
-            if n >= 1:
-                for i in self.multi_sample_no_replace(ins, batch_size):
-                    pn_batch_idx.append((i, 0))
-                # for i in range(round(n - 0.1)):
-                #     pn_batch_idx.extend(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
-            else:
-                if n > 0.8:  # just sample when enough positive and negative samples
-                    count += 1
-                    print(f"Over sampling num:{count}")
-                    pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
-        p_batch_idx.extend(pn_batch_idx)
+        # # 取簇间正向量形成训练数据
+        # p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
+
+        # # negative vector
+        # for ins in sent_id2quad_id.values():
+        #     n = len(ins) / batch_size
+        #     if n >= 1:
+        #         for i in self.multi_sample_no_replace(ins, batch_size):
+        #             pn_batch_idx.append((i, 0))
+        #         # for i in range(round(n - 0.1)):
+        #         #     pn_batch_idx.extend(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
+        #     else:
+        #         if n > 0.8:  # just sample when enough positive and negative samples
+        #             count += 1
+        #             print(f"Over sampling num:{count}")
+        #             pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
+        # p_batch_idx.extend(pn_batch_idx)
         # memory
 
         # memory update
@@ -305,11 +373,12 @@ class sample_dataloader(object):
 
         pool_num = batch_size // 2 + 1 if batch_size & 1 else batch_size // 2
         # 取簇间正向量形成训练数据
-        for i in range(1):
+        for j in range(2):
             if len(mem_pool) > pool_num:
                 p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size // 2)]
                 for i in self.multi_sample_no_replace(p_idx, batch_size // 2):
                     i.extend(np.random.choice(a=mem_pool, size=pool_num, replace=False).tolist())
+                    random.shuffle(i)
                     p_batch_idx.append((i, 1))
 
         random.shuffle(p_batch_idx)

@@ -24,10 +24,11 @@ class Bert_Encoder(base_model):
             self.pattern = config.pattern
         else:
             raise Exception('Wrong encoding.')
-
+        config.hidden_size = self.bert_config.hidden_size
+        config.output_size = config.encoder_output_size
         if self.pattern == 'entity_marker':
             self.encoder.resize_token_embeddings(config.vocab_size + config.marker_size)
-            self.linear_transform = nn.Linear(self.bert_config.hidden_size*2, self.output_size, bias=True)
+            self.linear_transform = nn.Linear(self.bert_config.hidden_size * 2, self.output_size, bias=True)
         else:
             self.linear_transform = nn.Linear(self.bert_config.hidden_size, self.output_size, bias=True)
 
@@ -66,15 +67,15 @@ class Bert_Encoder(base_model):
             for i in range(len(e11)):
                 instance_output = torch.index_select(tokens_output, 0, torch.tensor(i).cuda())
                 instance_output = torch.index_select(instance_output, 1, torch.tensor([e11[i], e21[i]]).cuda())
-                output.append(instance_output) # [B,N] --> [B,2,H]
+                output.append(instance_output)  # [B,N] --> [B,2,H]
 
             # for each sample in the batch, concatenate the representations of [E11] and [E21], and reshape
             output = torch.cat(output, dim=0)
-            output = output.view(output.size()[0], -1) # [B,N] --> [B,H*2]
-            
+            output = output.view(output.size()[0], -1)  # [B,N] --> [B,H*2]
+
             # the output dimension is [B, H*2], B: batchsize, H: hiddensize
-            output = self.drop(output)
-            output = self.linear_transform(output)
-            output = F.gelu(output)
-            output = self.layer_normalization(output)
+            # output = self.drop(output)
+            # output = self.linear_transform(output)
+            # output = F.gelu(output)
+            # output = self.layer_normalization(output)
         return output
