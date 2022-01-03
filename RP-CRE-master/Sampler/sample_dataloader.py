@@ -6,20 +6,28 @@ import json
 import random
 from transformers import BertTokenizer
 from torch.utils.data import Dataset
+import itertools
+
 
 class sample_dataloader(object):
 
-    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=2):
+    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=2, task_sample=True):
+        # When FUN_CODE is 0, quadruple is sentence of current task.
         self.quadruple = quadruple
         self.id2sent = id2sent
         self.memory = memory
         self.config = config
         self.FUN_CODE = FUN_CODE
+        if FUN_CODE == 0:
+            self.use_task_sample = task_sample
+            self.data_idx = self.get_mem_enhanced_data(self.config.batch_size,
+                                                       use_task_sample=self.use_task_sample)  # actually is data.
         if FUN_CODE == 1:
             self._ini_before_get_data()
             self.data_idx = self.get_data(self.config.batch_size)
         if FUN_CODE == 2:
             self.data_idx = self.get_contrastive_data(self.config.batch_size)
+
         self._ix = 0
 
         self.seed = seed
@@ -102,6 +110,61 @@ class sample_dataloader(object):
             emb_inp = torch.stack(emb_inp)
             self._ix += 1
             return sent_inp, emb_inp, labels, comparison
+        elif self.FUN_CODE == 0:
+            try:
+                batch_change, batch_fix = self.data_idx[self._ix]
+            except IndexError:
+                self.data_idx = self.get_mem_enhanced_data(self.config.batch_size, use_task_sample=self.use_task_sample)
+                self._ix = 0
+                raise StopIteration
+
+            trues = torch.tensor([item['relation'] for item in batch_change])
+            tokens = [torch.tensor(item['tokens']) for item in batch_change]
+
+            left_inp = torch.stack(tokens, dim=0)
+            preds = torch.tensor([item['relation'] for item in batch_fix])
+            tokens = [torch.tensor(item['tokens']) for item in batch_fix]
+            right_inp = torch.stack(tokens, dim=0)
+
+            comparison = torch.ones((trues.shape[0], preds.shape[0]))
+            trues = trues.expand((preds.shape[0], trues.shape[0])).transpose(-1, -2)
+            preds = preds.expand((trues.shape[0], preds.shape[0]))
+            labels = (trues == preds).int()
+
+            self.verify_metrix(labels, comparison)
+
+            self._ix += 1
+            return left_inp, right_inp, labels, comparison
+
+    def get_mem_enhanced_data(self, batch_size, use_task_sample=True):
+        # kmeans结果
+        left, right = [], []
+        batch_d = []
+        C = len(self.memory)
+
+        for i in self.memory.values():
+            random.shuffle(i)
+        for right_part in zip(*self.memory.values()):
+            right.append(right_part)
+        if use_task_sample:
+            # K=len(i)
+            # diff=(batch_size-C) # sentence minus memory : left minus right
+            # n=diff*K
+            # left_batch_size=C+diff
+            # sample_ins=random.choices(self.quadruple,k=int(n))
+            # data_pool = list(itertools.chain(*self.memory.values()))
+            # data_pool.extend(sample_ins)
+            # for l, r in zip(self.choice_object_no_replace(data_pool, left_batch_size, shuffle=True), right):
+            #     batch_d.append((l, r))
+            K = len(i)
+            sample_ins = random.choices(self.quadruple, k=int(K * batch_size))
+            for l, r in zip(self.choice_object_no_replace(sample_ins, batch_size, shuffle=True), right):
+                batch_d.append((l, r))
+        else:
+            data_pool = list(itertools.chain(*self.memory.values()))
+            for l, r in zip(self.choice_object_no_replace(data_pool, C, shuffle=True), right):
+                batch_d.append((l, r))
+        return batch_d
 
     def verify_metrix(self, labels, comparison):
 
@@ -115,7 +178,7 @@ class sample_dataloader(object):
             """
             if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
                 raise Exception('labels and comparison not matched')
-        elif self.FUN_CODE == 1:
+        elif self.FUN_CODE in [0, 1]:
             """
             检测labels每行是不是有且仅有一个1
             """
@@ -385,8 +448,12 @@ class sample_dataloader(object):
 
         return p_batch_idx
 
-    def choice_object(self, object_list, num):
-        pass
+    def choice_object_no_replace(self, object_list, num, shuffle):
+        idx_pool = list(range(len(object_list)))
+        ans = []
+        for ins_list in self.multi_sample_no_replace(idx_pool, num, shuffle=shuffle):
+            ans.append([object_list[i] for i in ins_list])
+        return ans
 
     def multi_sample_no_replace(self, list_collection, n, shuffle=True):
         if shuffle:
@@ -470,6 +537,13 @@ class data_sampler(object):
         # generate the task number
         self.batch = 0
         self.task_length = len(self.id2rel) // self.config.rel_per_task  # 每一轮任务进入几个新关系
+        self.lb_id2train_id = list(range(len(self.shuffle_index)))
+        # start_lb=0
+        # for ind in self.shuffle_index:
+        #     self.lb_id2train_id[ind]=start_lb
+        #     start_lb += 1
+        #     if start_lb%self.config.rel_per_task==0:
+        #         start_lb=0
 
         # record relations
         self.seen_relations = []

@@ -104,10 +104,10 @@ class Dropout_Layer(base_model):
 
     def forward(self, input):
         output = self.drop(input)
-        output = self.linear_transform(output)
-        output = F.gelu(output)
+        output1 = self.linear_transform(output)
+        output = F.gelu(output1)
         output = self.layer_normalization(output)
-        return output, output
+        return output, output1
 
         # output = self.linear1(input)
         # output = F.gelu(output)
