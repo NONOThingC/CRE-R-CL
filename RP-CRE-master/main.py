@@ -76,7 +76,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                 mem_for_batch = mem_data.clone()
                 mem_for_batch.unsqueeze(0)
                 mem_for_batch = mem_for_batch.expand(len(sent_inp) + len(emb_inp), -1, -1)
-                inp_lst = [sent_inp, emb_inp, comparison, memory_network, mem_for_batch]
+                inp_lst = [sent_inp, emb_inp, comparison, memory_network, mem_for_batch, 0]
             else:
                 inp_lst = [sent_inp, emb_inp, comparison]
 
@@ -762,12 +762,13 @@ def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, 
     return correct / n
 
 
-def evaluate_contrastive_model(config, contrastive_network, memory, test_data, memory_network=None, protos4eval=None,
-                               FUNCODE=0):
+def evaluate_contrastive_model(config, contrastive_network, memory, test_data, use_mem_net=False, memory_network=None,
+                               protos4eval=None):
     batch_size = 16
     testdata_loader = get_data_loader(config, test_data, batch_size=batch_size)
+    if use_mem_net:
+        memory_network.eval()
     contrastive_network.eval()
-    memory_network.eval()
 
     # protos4eval= protos4eval.unsqueeze(0)
     # protos4eval = protos4eval.expand(batch_size + config.num_protos, -1, -1)  # slow!!!!!!!!!!!!!!
@@ -783,19 +784,27 @@ def evaluate_contrastive_model(config, contrastive_network, memory, test_data, m
 
             labels = torch.stack([torch.tensor(label2mem_id[label.item()], device=config.device) for label in labels],
                                  dim=-1)
-            mem_for_batch = protos4eval.clone()
-            mem_for_batch.unsqueeze(0)
+
 
             for batch_ins in zip(*memory.values()):
-                mem_for_batch = protos4eval.clone()
+
                 right = [torch.tensor(item['tokens']) for item in batch_ins]
                 # labels = labels.to(config.device)  # B1
                 right = torch.stack(right, dim=0).to(config.device)  # B2*H
                 tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)  # B1*H
-                mem_for_batch = mem_for_batch.expand(len(tokens) + len(right), -1, -1)
-                logits_aa = contrastive_network(tokens, right, comparison=torch.ones(len(tokens), len(memory),
-                                                                                     device=config.device),
-                                                memory_network=memory_network, mem_for_batch=mem_for_batch)  # B1*B2
+
+                if use_mem_net:
+                    mem_for_batch = protos4eval.clone()
+                    mem_for_batch.unsqueeze(0)
+                    mem_for_batch = mem_for_batch.expand(len(tokens) + len(right), -1, -1)
+                    logits_aa = contrastive_network(tokens, right, comparison=torch.ones(len(tokens), len(memory),
+                                                                                         device=config.device),
+                                                    memory_network=memory_network, mem_for_batch=mem_for_batch,
+                                                    FUN_CODE=0)  # B1*B2
+                else:
+                    logits_aa = contrastive_network(tokens, right, comparison=torch.ones(len(tokens), len(memory),
+                                                                                         device=config.device),
+                                                    FUN_CODE=1)  # B1*B2
                 # predict_matrix = torch.argmax(logits_aa, dim=-1)  # B1
                 _, predict_matrix = torch.topk(logits_aa, k=2, dim=-1, largest=True)  # B1
                 results += torch.zeros_like(results).scatter_(-1, predict_matrix, 1)
@@ -812,7 +821,6 @@ def evaluate_contrastive_model(config, contrastive_network, memory, test_data, m
             labels_mask = torch.zeros((preds.shape[0], len(label2mem_id)), device=config.device).scatter_(-1,
                                                                                                           labels.view(
                                                                                                               -1, 1), 1)
-
             top_k_right += (topk_mask * labels_mask).sum().item()
             cum_right += (labels == preds).sum().item()
             cum_len += len(preds)
@@ -834,6 +842,7 @@ def quads2origin_data(quads, id2sentence):
 
 if __name__ == '__main__':
     FUNCODE = 0  # Funcode==1为4类版本，为2为多类版本
+    use_mem_network = False
     parser = ArgumentParser(
         description="Config for lifelong relation extraction (classification)")
     parser.add_argument('--config', default='config.ini')
@@ -876,11 +885,11 @@ if __name__ == '__main__':
         elif FUNCODE == 2:
             num_class = config.num_of_relation
         else:
-            num_class = config.rel_per_task
+            num_class = config.num_of_relation
         classifier = Softmax_Layer(input_size=encoder.output_size, num_class=num_class).to(config.device)
         # 这里的encoder没有加dropout_layer
         contrastive_network = ContrastiveNetwork(config=config, encoder=encoder, dropout_layer=dropout_layer,
-                                                 hidden_size=config.encoder_output_size, FUN_CODE=FUNCODE).to(
+                                                 hidden_size=config.encoder_output_size).to(
             config.device)
         # record testing results
         sequence_results = []
@@ -925,19 +934,16 @@ if __name__ == '__main__':
             #     for _, ins in ins_list:
             #         memory_ins.append(ins)
             # mem_datas=quads2origin_data(memory_ins, id2sentence)
-            if steps == 0:
-                train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                                   config.step1_epochs)
+
+            # First Training
+
+            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
+                               config.step1_epochs)
 
             # # first model
             quads = train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, FUNCODE=FUNCODE)
 
-            memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
-                                                         input_size=encoder.output_size,
-                                                         output_size=encoder.output_size,
-                                                         key_size=config.key_size,
-                                                         head_size=config.head_size
-                                                         ).to(config.device)
+            # Second training
 
             for relation in current_relations:
                 memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
@@ -956,36 +962,57 @@ if __name__ == '__main__':
             # memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
             #                           memory)  # 须在采样之后，否则本轮中会有memory
 
-            for ins_list in memory.values():
-                temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
-            temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
+            if use_mem_network:
+                memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
+                                                             input_size=encoder.output_size,
+                                                             output_size=encoder.output_size,
+                                                             key_size=config.key_size,
+                                                             head_size=config.head_size
+                                                             ).to(config.device)
+                for ins_list in memory.values():
+                    temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
+                temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                    {'params': memory_network.parameters(), 'lr': 1e-4}
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+                    "epoch": config.step2_epochs, "memory_network": memory_network, "mem_data": temp_protos,
+                    "FUNCODE": FUNCODE,
+                }
+            else:
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+                    "epoch": config.step2_epochs, "FUNCODE": 1,
+                }
 
-            optimizer = optim.Adam([
-                {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                {'params': memory_network.parameters(), 'lr': 1e-4}
-            ])
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                        step_size=decay_steps,
-                                                        gamma=decay_rate)
             # inp_dict = {
             #     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
             #     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,"FUNCODE":1,
             # }
-            inp_dict = {
-                "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-                "epoch": config.contrast_epoch, "memory_network": memory_network, "mem_data": temp_protos,
-                "FUNCODE": FUNCODE,
-            }
+
             train_contrastive(**inp_dict)
 
-            for relation in current_relations:
-                memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
-                                                       training_data[relation])  # 训练以后会选择出个K个数据又记录下来
-            temp_protos = []
-            for ins_list in memory.values():
-                temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
-            temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
+            # Third training
+            # for relation in current_relations:
+            #     memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
+            #                                            training_data[relation])  # 训练以后会选择出个K个数据又记录下来
+            # temp_protos = []
+            # for ins_list in memory.values():
+            #     temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
+            # temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
 
             if FUNCODE == 0:
                 task_sample = False
@@ -993,40 +1020,36 @@ if __name__ == '__main__':
                                                config=config,
                                                seed=config.seed + steps * 100, FUN_CODE=FUNCODE,
                                                task_sample=task_sample)
-            optimizer = optim.Adam([
-                {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                {'params': memory_network.parameters(), 'lr': 1e-4}
-            ])
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                        step_size=decay_steps,
-                                                        gamma=decay_rate)
-            inp_dict = {
-                "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-                "epoch": config.contrast_epoch, "memory_network": memory_network, "mem_data": temp_protos,
-                "FUNCODE": FUNCODE,
-            }
+            if use_mem_network:
+
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                    {'params': memory_network.parameters(), 'lr': 1e-4}
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+                    "epoch": config.step3_epochs, "memory_network": memory_network, "mem_data": temp_protos,
+                    "FUNCODE": FUNCODE,
+                }
+            else:
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+                    "epoch": config.step2_epochs, "FUNCODE": 1,
+                }
             train_contrastive(**inp_dict)
-            # memory update
 
-            # memory_ins = []
-            # for ins_list in memory.values():
-            #     for _, ins in ins_list:
-            #         memory_ins.append(ins)
-            # mem_datas = quads2origin_data(memory_ins, id2sentence)
-
-            # memory_dataloader = DataLoader(
-            #     MyDataset(memory_ins),
-            #     batch_size=config.batch_size,
-            #     shuffle=True,
-            #     num_workers=0,
-            #     drop_last=False,
-            #     collate_fn=memory_fn(id2sent=id2sentence).collect_fn,
-            # )
-            # last_data = train_data_for_initial + mem_datas  # shuffle by dataloader # may cause potiential BUG!!!!!!
-            # train_last(config, encoder, dropout_layer, classifier, last_data)
-            # memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
-            #                           memory)  # 须在采样之后，否则本轮中会有memory
             test_data_1 = []
             for relation in current_relations:
                 test_data_1 += test_data[relation]
@@ -1048,21 +1071,25 @@ if __name__ == '__main__':
             protos4eval = torch.cat(protos4eval, dim=0).detach()  # 新和老关系都被选择到了
 
             # current evaluation
+            if not use_mem_network:
+                memory_network = None
+                protos4eval = None
             cont_cur_acc, topk_cur_acc = evaluate_contrastive_model(config, contrastive_network, memory, test_data_1,
                                                                     memory_network=memory_network,
-                                                                    protos4eval=protos4eval, FUNCODE=FUNCODE)
+                                                                    protos4eval=protos4eval,
+                                                                    use_mem_net=use_mem_network)
 
             cont_total_acc, topk_total_acc = 0, 0
-            for k in range(1):
+            for k in range(10):
                 total_cur, total_topk = evaluate_contrastive_model(config, contrastive_network, memory, test_data_2,
                                                                    memory_network=memory_network,
-                                                                   protos4eval=protos4eval, FUNCODE=FUNCODE)
+                                                                   protos4eval=protos4eval, use_mem_net=use_mem_network)
                 print(f'history test acc:{total_cur}')
                 print(f'history topK acc:{total_topk}')
                 cont_total_acc = max(cont_total_acc, total_cur)
                 topk_total_acc = max(topk_total_acc, total_topk)
                 # for i in memory.values():
-                #     random.shuffle(i)
+            #     random.shuffle(i)
 
             print(f'\nContrastive model current test acc:{cont_cur_acc}')
             print(f'Contrastive model history test acc:{cont_total_acc}')
