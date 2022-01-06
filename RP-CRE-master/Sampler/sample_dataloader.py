@@ -11,13 +11,15 @@ import itertools
 
 class sample_dataloader(object):
 
-    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=2, task_sample=True):
+    def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=3, rel_rep=None, task_sample=True,
+                 use_mem_data=False):
         # When FUN_CODE is 0, quadruple is sentence of current task.
         self.quadruple = quadruple
         self.id2sent = id2sent
         self.memory = memory
         self.config = config
         self.FUN_CODE = FUN_CODE
+        self.use_mem_data = use_mem_data
         if FUN_CODE == 0:
             self.use_task_sample = task_sample
             self.data_idx = self.get_mem_enhanced_data(self.config.batch_size,
@@ -27,7 +29,11 @@ class sample_dataloader(object):
             self.data_idx = self.get_data(self.config.batch_size)
         if FUN_CODE == 2:
             self.data_idx = self.get_contrastive_data(self.config.batch_size)
-
+        if FUN_CODE == 3:
+            self.rel_rep = rel_rep
+            self.use_task_sample = task_sample
+            self.data_idx = self.get_fix_proto_data(self.config.batch_size,
+                                                    use_task_sample=self.use_task_sample)  # actually is data.
         self._ix = 0
 
         self.seed = seed
@@ -135,6 +141,56 @@ class sample_dataloader(object):
 
             self._ix += 1
             return left_inp, right_inp, labels, comparison
+        elif self.FUN_CODE == 3:
+            try:
+                batch_change, batch_fix = self.data_idx[self._ix]
+            except IndexError:
+                self.data_idx = self.get_fix_proto_data(self.config.batch_size,
+                                                        use_task_sample=self.use_task_sample)
+                self._ix = 0
+                raise StopIteration
+
+            trues = torch.tensor([item['relation'] for item in batch_change])
+            tokens = [torch.tensor(item['tokens']) for item in batch_change]
+            left_inp = torch.stack(tokens, dim=0)
+
+            random.shuffle(batch_fix)
+            preds = torch.tensor(batch_fix)
+            right_inp = torch.cat([self.rel_rep[i] for i in batch_fix], dim=0)
+
+            comparison = torch.ones((trues.shape[0], preds.shape[0]))
+            trues = trues.expand((preds.shape[0], trues.shape[0])).transpose(-1, -2)
+            preds = preds.expand((trues.shape[0], preds.shape[0]))
+            labels = (trues == preds).int()
+
+            self.verify_metrix(labels, comparison)
+
+            self._ix += 1
+            return left_inp, right_inp, labels, comparison
+
+    def get_fix_proto_data(self, batch_size, use_task_sample=True):
+        # kmeans结果
+        left, right = [], []
+        batch_d = []
+        C = len(self.memory)
+        right = list(self.rel_rep.keys())
+
+        for i in self.memory.values():
+            random.shuffle(i)
+
+        if use_task_sample:
+            if self.use_mem_data:
+                for l in self.choice_object_no_replace(self.quadruple + list(itertools.chain(*self.memory.values())),
+                                                       batch_size, shuffle=True):
+                    batch_d.append((l, right))
+            else:
+                for l in self.choice_object_no_replace(self.quadruple, batch_size, shuffle=True):
+                    batch_d.append((l, right))
+        else:
+            data_pool = list(itertools.chain(*self.memory.values()))
+            for l in self.choice_object_no_replace(data_pool, C, shuffle=True):
+                batch_d.append((l, right))
+        return batch_d
 
     def get_mem_enhanced_data(self, batch_size, use_task_sample=True):
         # kmeans结果
@@ -522,7 +578,7 @@ class data_sampler(object):
 
         # read relation data
         self.id2rel, self.rel2id = self._read_relations(config.relation_file)
-
+        self.config.num_of_relation = len(self.rel2id)
         # random sampling
         self.seed = seed
         if self.seed != None:
@@ -560,6 +616,9 @@ class data_sampler(object):
     def __iter__(self):
         return self
 
+    def __len__(self):
+        return self.task_length
+
     def __next__(self):
 
         if self.batch == self.task_length:
@@ -567,7 +626,7 @@ class data_sampler(object):
             raise StopIteration()
 
         indexs = self.shuffle_index[
-                 self.config.rel_per_task * self.batch: self.config.rel_per_task * (self.batch + 1)]  #每个任务出现的id
+                 self.config.rel_per_task * self.batch: self.config.rel_per_task * (self.batch + 1)]  # 每个任务出现的id
         self.batch += 1
 
         current_relations = []

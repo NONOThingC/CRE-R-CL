@@ -14,10 +14,10 @@ class ContrastiveNetwork(base_model):
         self.encoder = encoder
         self.dropout_layer = dropout_layer
         self.hidden_size = hidden_size
-        self.dim_trans = nn.Linear(config.encoder_output_size, hidden_size)
+        # self.dim_trans = nn.Linear(config.encoder_output_size, hidden_size)
         self.output_size = config.encoder_output_size  # for classification number
         self.projector = nn.Linear(hidden_size, self.output_size)
-        self.emb_trans = nn.Linear(hidden_size, hidden_size)
+        # self.emb_trans = nn.Linear(hidden_size, hidden_size)
         self.relu = nn.GELU()
         self.projector1 = nn.Linear(self.output_size, self.output_size // 2)
         self.temperature = config.temperature
@@ -77,6 +77,25 @@ class ContrastiveNetwork(base_model):
             hidden = F.normalize(hidden, dim=-1, p=2)
             # hidden = torch.linalg.norm(hidden, dim=-1)
             hidden1, hidden2 = torch.split(hidden, [len(left), len(right)], dim=0)
+            logits_aa = torch.matmul(hidden1, torch.transpose(hidden2, -1, -2)) / self.temperature  # B*K
+            logits_aa = logits_aa + (comparison == 0).float() * (-LARGE_NUM)  # mask#B1 * B2
+            return logits_aa
+        elif FUN_CODE == 3:
+            left = self.dropout_layer(self.encoder(enc_inp))[1]
+            hidden = memory_network(torch.cat([left, proj_inp], dim=0), mem_for_batch)
+            hidden = self.projector1(self.layer_normalization(self.relu(self.projector(hidden))))
+            hidden = F.normalize(hidden, dim=-1, p=2)
+            hidden1, hidden2 = torch.split(hidden, [len(left), len(proj_inp)], dim=0)
+            logits_aa = torch.matmul(hidden1, torch.transpose(hidden2, -1, -2)) / self.temperature  # B*K
+            logits_aa = logits_aa + (comparison == 0).float() * (-LARGE_NUM)  # mask#B1 * B2
+            return logits_aa
+        elif FUN_CODE == 4:  # no mem
+            left = self.dropout_layer(self.encoder(enc_inp))[1]
+            hidden = torch.cat([left, proj_inp], dim=0)
+            hidden = self.projector1(self.layer_normalization(self.relu(self.projector(hidden))))
+            hidden = F.normalize(hidden, dim=-1, p=2)
+            # hidden = torch.linalg.norm(hidden, dim=-1)
+            hidden1, hidden2 = torch.split(hidden, [len(left), len(proj_inp)], dim=0)
             logits_aa = torch.matmul(hidden1, torch.transpose(hidden2, -1, -2)) / self.temperature  # B*K
             logits_aa = logits_aa + (comparison == 0).float() * (-LARGE_NUM)  # mask#B1 * B2
             return logits_aa
