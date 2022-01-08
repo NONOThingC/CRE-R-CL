@@ -34,7 +34,6 @@ class Bert_Encoder(base_model):
 
         self.layer_normalization = nn.LayerNorm([self.output_size])
 
-
     def get_output_size(self):
         return self.output_size
 

@@ -953,62 +953,60 @@ if __name__ == '__main__':
             for rel_id, ins_list in memory.items():
                 rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
 
-            if steps != len(sampler) - 1:
+            task_sample = True
+            ctst_dload = sample_dataloader(quadruple=train_data_for_initial, memory=memory, rel_rep=rel_rep,
+                                           id2sent=id2sentence,
+                                           config=config,
+                                           seed=config.seed + steps * 100, FUN_CODE=FUNCODE,
+                                           task_sample=task_sample)
 
-                task_sample = True
-                ctst_dload = sample_dataloader(quadruple=train_data_for_initial, memory=memory, rel_rep=rel_rep,
-                                               id2sent=id2sentence,
-                                               config=config,
-                                               seed=config.seed + steps * 100, FUN_CODE=FUNCODE,
-                                               task_sample=task_sample)
+            # memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
+            #                           memory)  # 须在采样之后，否则本轮中会有memory
 
-                # memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                #                           memory)  # 须在采样之后，否则本轮中会有memory
+            if use_mem_network:
+                memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
+                                                             input_size=encoder.output_size,
+                                                             output_size=encoder.output_size,
+                                                             key_size=config.key_size,
+                                                             head_size=config.head_size
+                                                             ).to(config.device)
+                for ins_list in memory.values():
+                    temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
+                temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                    {'params': memory_network.parameters(), 'lr': 1e-4}
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
+                    "evaluator": None,
+                    "epoch": config.step2_epochs, "memory_network": memory_network, "mem_data": temp_protos,
+                    "FUNCODE": FUNCODE,
+                }
+            else:
+                optimizer = optim.Adam([
+                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                ])
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                            step_size=decay_steps,
+                                                            gamma=decay_rate)
+                inp_dict = {
+                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
+                    "evaluator": None,
+                    "epoch": config.step2_epochs, "FUNCODE": 1,
+                }
 
-                if use_mem_network:
-                    memory_network = Attention_Memory_Simplified(mem_slots=len(seen_relations),
-                                                                 input_size=encoder.output_size,
-                                                                 output_size=encoder.output_size,
-                                                                 key_size=config.key_size,
-                                                                 head_size=config.head_size
-                                                                 ).to(config.device)
-                    for ins_list in memory.values():
-                        temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
-                    temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
-                    optimizer = optim.Adam([
-                        {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                        {'params': memory_network.parameters(), 'lr': 1e-4}
-                    ])
-                    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                                step_size=decay_steps,
-                                                                gamma=decay_rate)
-                    inp_dict = {
-                        "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                        "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
-                        "evaluator": None,
-                        "epoch": config.step2_epochs, "memory_network": memory_network, "mem_data": temp_protos,
-                        "FUNCODE": FUNCODE,
-                    }
-                else:
-                    optimizer = optim.Adam([
-                        {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                    ])
-                    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                                step_size=decay_steps,
-                                                                gamma=decay_rate)
-                    inp_dict = {
-                        "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                        "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
-                        "evaluator": None,
-                        "epoch": config.step2_epochs, "FUNCODE": 1,
-                    }
+            # inp_dict = {
+            #     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+            #     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,"FUNCODE":1,
+            # }
 
-                # inp_dict = {
-                #     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                #     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,"FUNCODE":1,
-                # }
-
-                train_contrastive(**inp_dict)
+            train_contrastive(**inp_dict)
 
             # Third training
             # for relation in current_relations:
