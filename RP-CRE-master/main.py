@@ -72,7 +72,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
 
             }
             # or
-            if FUNCODE == 3:
+            if FUNCODE == 4:
                 mem_for_batch = mem_data.clone()
                 mem_for_batch.unsqueeze(0)
                 mem_for_batch = mem_for_batch.expand(len(sent_inp) + len(emb_inp), -1, -1)
@@ -102,7 +102,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
 
             batch_avg_loss = batch_cum_loss / (batch_ind + 1)
             batch_avg_acc = acc
-
+            print(int(torch.cuda.memory_allocated()/1024/1024))
             # accuracy calculation end
             batch_print_format = "\rContrastive Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
             # batch logger and print start
@@ -260,7 +260,7 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
     return memory
 
 
-def train_first(config, encoder, dropout_layer, classifier, training_data, FUNCODE=0):
+def train_first(config, encoder, dropout_layer, classifier, training_data,  current_relations, rel2id, fix_label, FUNCODE=0):
     data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
     epochs = config.train_epoch
     encoder.train()
@@ -289,7 +289,10 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, FUNCO
 
             tokens_id = torch.stack(tokens_id, dim=0)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            if not fix_label:
+                labels=relation2id(current_relations,rel2id,labels)
             labels = labels.to(config.device)
+
             reps = encoder(tokens)
             output_embeddings = []
             for _ in range(config.f_pass):
@@ -557,7 +560,19 @@ def select_data(config, encoder, dropout_layer, sample_set):
     return mem_set
 
 
-def train_simple_model(config, encoder, dropout_layer, classifier, training_data, epochs, lb_id2train_id=None,
+def relation2id(current_relations,rel2id,relationslist):
+    d={}
+    for i in range(len(current_relations)):
+        d[rel2id[current_relations[i]]]=i
+    ans=[]
+    relationslist=np.array(relationslist)
+    for j in range(len(relationslist)):
+        ans.append(d[relationslist[j]])
+    return torch.LongTensor(torch.tensor(ans))
+
+
+
+def train_simple_model(config, encoder, dropout_layer, classifier, training_data, epochs, current_relations, rel2id, fix_label, lb_id2train_id=None,
                        FUNCODE=2):
     data_loader = get_data_loader(config, training_data, shuffle=True)
 
@@ -571,13 +586,15 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
         {'params': classifier.parameters(), 'lr': 0.001}
     ])
-
     for epoch_i in range(epochs):
         losses = []
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
             optimizer.zero_grad()
+            if not fix_label:
+                labels=relation2id(current_relations, rel2id, labels)
 
             labels = labels.to(config.device)
+
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             reps = encoder(tokens)
             reps, _ = dropout_layer(reps)
@@ -845,7 +862,7 @@ def quads2origin_data(quads, id2sentence):
 if __name__ == '__main__':
     FUNCODE = 3  # Funcode==1为4类版本，为2为多类版本
     use_mem_network = False
-    fix_labels = True
+    fix_labels = False
     parser = ArgumentParser(
         description="Config for lifelong relation extraction (classification)")
     parser.add_argument('--config', default='config.ini')
@@ -939,10 +956,10 @@ if __name__ == '__main__':
             # First Training
 
             train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                               config.step1_epochs)
+                               config.step1_epochs, current_relations,rel2id,fix_labels)
 
             # # first model
-            train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, FUNCODE=FUNCODE)
+            train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, current_relations, rel2id, fix_labels, FUNCODE=FUNCODE)
 
             # Second training
 
@@ -1016,7 +1033,7 @@ if __name__ == '__main__':
             # for ins_list in memory.values():
             #     temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
             # temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
-
+            torch.cuda.empty_cache()
             task_sample = False
             ctst_dload = sample_dataloader(quadruple=train_data_for_initial, rel_rep=rel_rep, memory=memory,
                                            id2sent=id2sentence,
@@ -1049,7 +1066,7 @@ if __name__ == '__main__':
                 inp_dict = {
                     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
                     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-                    "epoch": config.step2_epochs, "FUNCODE": 1,
+                    "epoch": config.step3_epochs, "FUNCODE": 1,
                 }
             train_contrastive(**inp_dict)
 
@@ -1062,12 +1079,12 @@ if __name__ == '__main__':
                 test_data_2 += historic_test_data[relation]
             # trash clean
             ctst_dload = None
-            cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
-            total_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
-            cur_all_acc.append(cur_acc)
-            his_all_acc.append(total_acc)
-            print(f'\nFirst model current test acc:{cur_all_acc}')
-            print(f'First model history test acc:{his_all_acc}')
+            #cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
+            #total_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations)
+            #cur_all_acc.append(cur_acc)
+            #his_all_acc.append(total_acc)
+            #print(f'\nFirst model current test acc:{cur_all_acc}')
+            #print(f'First model history test acc:{his_all_acc}')
 
             # protos4eval = {}
             # for label_id,ins_list in memory.items():
