@@ -41,6 +41,8 @@ from utils import outputer, batch2device
 from Sampler.sample_dataloader import sample_dataloader, data_sampler, MyDataset, memory_fn
 from data_loader import get_data_loader
 from model.memory_network.attention_memory_simplified import Attention_Memory_Simplified
+from sklearn import manifold
+import matplotlib.pyplot as plt
 
 
 def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator,
@@ -102,7 +104,6 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
 
             batch_avg_loss = batch_cum_loss / (batch_ind + 1)
             batch_avg_acc = acc
-            print(int(torch.cuda.memory_allocated()/1024/1024))
             # accuracy calculation end
             batch_print_format = "\rContrastive Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
             # batch logger and print start
@@ -528,13 +529,74 @@ def get_proto(config, encoder, dropout_layer, mem_set):
                 feature = dropout_layer(encoder(tokens))[1]
             features.append(feature)
         features = torch.cat(features, dim=0)
-        proto = torch.mean(features, dim=0, keepdim=True)
+        proto = torch.mean(features, dim=0, keepdim=True).cpu()
 
     # return the averaged prototype
     return proto
 
+#tsne plot
+def get_tsne(feature):
+    tsne = manifold.TSNE(n_components=2, init='pca', random_state=501)
+    x1=tsne.fit_transform(feature)
+    x1_min, x1_max = x1.min(0), x1.max(0)
+    x1_norm = (x1 - x1_min) / (x1_max - x1_min)
+    return x1_norm
 
-# # Use K-Means to select what samples to save, similar to at_least = 0
+
+def tsne_plot(config,encoder,dropout_layer,tokens_task1,tokens_task2, flag, num_points):
+    data_loader1 = get_data_loader(config, tokens_task1, shuffle=False, drop_last=False, batch_size=1)
+    encoder.eval()
+    dropout_layer.eval()
+    features1 = {}
+    for step, (labels, tokens, _) in enumerate(data_loader1):
+        with torch.no_grad():
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            feature = dropout_layer(encoder(tokens))[1].cpu()
+            labels=int(labels)
+        if labels not in features1:
+            features1[labels]=[feature]
+        else:
+            features1[labels].append(feature)
+    for key,values in features1.items():
+        features1[key]=get_tsne(np.concatenate(values))
+    data_loader2 = get_data_loader(config, tokens_task2, shuffle=False, drop_last=False, batch_size=1)
+    features2= {}
+    for step, (labels, tokens, _) in enumerate(data_loader2):
+        with torch.no_grad():
+            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+            feature = dropout_layer(encoder(tokens))[1].cpu()
+            labels=int(labels)
+        if labels not in features2:
+            features2[labels] = [feature]
+        else:
+            features2[labels].append(feature)
+    for key, values in features2.items():
+        features2[key] = get_tsne(np.concatenate(values))
+    colors=['r','b','g','y','c','m','k','pink']
+    if not flag:
+        for i, (key, values) in enumerate(features1.items()):
+            plt.scatter(values[:num_points,0],values[:num_points,1],c =colors[i],label='task1_'+str(key),marker='.')
+        for i, (key, values) in enumerate(features2.items()):
+            plt.scatter(values[:num_points, 0], values[:num_points, 1],c =colors[i+len(colors)//2], label='task2_' + str(key),marker='x')
+        #plt.legend()
+        plt.title('distribution after first training')
+        print('first picture finished')
+        plt.savefig('firstpicture_2.png')
+        plt.clf()
+        plt.cla()
+    if flag:
+        for i, (key, values) in enumerate(features1.items()):
+            plt.scatter(values[:num_points,0],values[:num_points,1],c=colors[i], label='task1_'+str(key),marker='.')
+        for i, (key, values) in enumerate(features2.items()):
+            plt.scatter(values[:num_points, 0], values[:num_points, 1], c=colors[i+len(colors)//2], label='task2_' + str(key),marker='x')
+        #plt.legend()
+        plt.title('distribution after contrastive training')
+        print('second picture finished')
+        plt.savefig('secondpicture_2.png')
+
+
+
+    # # Use K-Means to select what samples to save, similar to at_least = 0
 def select_data(config, encoder, dropout_layer, sample_set):
     data_loader = get_data_loader(config, sample_set, shuffle=False, drop_last=False, batch_size=1)
     features = []
@@ -859,10 +921,12 @@ def quads2origin_data(quads, id2sentence):
     return ret_d
 
 
+
+
 if __name__ == '__main__':
     FUNCODE = 3  # Funcode==1为4类版本，为2为多类版本
     use_mem_network = False
-    fix_labels = False
+    fix_labels = True
     parser = ArgumentParser(
         description="Config for lifelong relation extraction (classification)")
     parser.add_argument('--config', default='config.ini')
@@ -954,14 +1018,25 @@ if __name__ == '__main__':
             # mem_datas=quads2origin_data(memory_ins, id2sentence)
 
             # First Training
+            if steps == 0:
+                tokens_task1 = train_data_for_initial
+            if steps==1:
+                tokens_task2 = train_data_for_initial
+
+
 
             train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                               config.step1_epochs, current_relations,rel2id,fix_labels)
+                               config.step1_epochs, current_relations, rel2id, fix_labels)
 
             # # first model
             train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, current_relations, rel2id, fix_labels, FUNCODE=FUNCODE)
 
             # Second training
+            num_points=50
+            # picture before contrastive learning
+            if steps == 1:
+                flag=False
+                tsne_plot(config,encoder,dropout_layer,tokens_task1, tokens_task2,flag,num_points)
 
             for relation in current_relations:
                 memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
@@ -1069,6 +1144,11 @@ if __name__ == '__main__':
                     "epoch": config.step3_epochs, "FUNCODE": 1,
                 }
             train_contrastive(**inp_dict)
+
+            # picture after contrastive learning
+            if steps == 1:
+                flag = True
+                tsne_plot(config, encoder, dropout_layer, tokens_task1, tokens_task2, flag,num_points)
 
             test_data_1 = []
             for relation in current_relations:
