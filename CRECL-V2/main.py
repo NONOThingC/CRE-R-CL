@@ -11,6 +11,8 @@
 # print(project_path)
 # # 把项目路径加入python搜索路径
 # sys.path.append(project_path)
+import itertools
+
 from scipy import linalg
 import collections
 import functools
@@ -269,6 +271,10 @@ def select_to_memory(config, encoder, dropout_layer, classifier, training_data, 
 
 def slt_to_mem_by_uncty(config, encoder, dropout_layer, classifier, training_data, current_relations, rel2id, fix_label,
                         n_rel=None):
+    r_id2id = relation2id(convert_relations=current_relations, rel2id=rel2id)
+    id2rel_id = {v: k for k, v in r_id2id.items()}
+    if not fix_label:
+        n_rel = set(r_id2id[i] for i in n_rel)
     data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
     epochs = config.train_epoch
     encoder.eval()
@@ -282,7 +288,8 @@ def slt_to_mem_by_uncty(config, encoder, dropout_layer, classifier, training_dat
             logits_all = []
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             if not fix_label:
-                labels, id2rel_id = relation2id(current_relations, rel2id, labels)
+                labels = labels.tolist()
+                labels = torch.tensor([r_id2id[label] for label in labels], device=config.device)
             labels = labels.to(config.device)  # B labels don't need to care
 
             reps = encoder(tokens)
@@ -333,16 +340,19 @@ def slt_to_mem_by_uncty(config, encoder, dropout_layer, classifier, training_dat
     return memory  # just for remain of memory has change
 
 
-def train_first(config, encoder, dropout_layer, classifier, training_data, current_relations, rel2id, fix_label,
+def train_first(config, encoder, dropout_layer, classifier, training_data, cum_relations, rel2id, fix_label,
                 FUNCODE=0, n_rel=None):
+    r_id2id = relation2id(convert_relations=cum_relations, rel2id=rel2id)
+    if not fix_label:
+        n_rel = set(r_id2id[i] for i in n_rel)
     data_loader = get_data_loader(config, training_data, batch_size=config.batch_size, shuffle=True)
     epochs = config.train_epoch
     encoder.train()
     dropout_layer.train()
     classifier.train()
     cur_num = np.array([0, 0, 0, 0, 0, 0])
-    criterion = nn.CrossEntropyLoss()
-    # criterion = functools.partial(contrastive_loss, FUNCODE=0)
+    # criterion = nn.CrossEntropyLoss()
+    criterion = functools.partial(contrastive_loss, FUNCODE=1)
     optimizer = optim.Adam([
         {'params': encoder.parameters(), 'lr': 0.00001},
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
@@ -364,7 +374,8 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, curre
             tokens_id = torch.stack(tokens_id, dim=0)
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             if not fix_label:
-                labels, _ = relation2id(current_relations, rel2id, labels)
+                labels = labels.tolist()
+                labels = torch.tensor([r_id2id[label] for label in labels], device=config.device)
             labels = labels.to(config.device)
 
             reps = encoder(tokens)
@@ -737,28 +748,28 @@ def select_data(config, encoder, dropout_layer, sample_set):
 #         rel_rep[k]=newX[i]
 #     return rel_rep
 
-def relation2id(current_relations, rel2id, relationslist):
+def relation2id(convert_relations, rel2id):
     """
     :param current_relations: current relation set
     :param rel2id: all relation to id map
-    :param relationslist: needed convert list
+    :param convert_list: needed convert list
     :return: use rel2id to convert current relation to corresponding map.
     """
-    d = {}
-    for i in range(len(current_relations)):
-        d[rel2id[current_relations[i]]] = i
-    ans = []
-    id2relid = {v: k for k, v in d.items()}
+    d = {}  # rel_id2id
+    for i in range(len(convert_relations)):
+        d[rel2id[convert_relations[i]]] = i
+    return d
 
-    relationslist = np.array(relationslist)
-    for j in range(len(relationslist)):
-        ans.append(d[relationslist[j]])
-    return torch.LongTensor(torch.tensor(ans)), id2relid
+    # convert_list = np.array(convert_list)
+    # for j in range(len(convert_list)):
+    #     ans.append(d[convert_list[j]])
+    # return torch.LongTensor(torch.tensor(ans))
 
 
-def train_simple_model(config, encoder, dropout_layer, classifier, training_data, epochs, current_relations, rel2id,
+def train_simple_model(config, encoder, dropout_layer, classifier, training_data, epochs, cum_relations, rel2id,
                        fix_label,
                        FUNCODE=2):
+    r_id2id = relation2id(convert_relations=cum_relations, rel2id=rel2id)
     data_loader = get_data_loader(config, training_data, shuffle=True)
 
     encoder.train()
@@ -776,8 +787,8 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
             optimizer.zero_grad()
             if not fix_label:
-                labels, _ = relation2id(current_relations, rel2id, labels)
-
+                labels = labels.tolist()
+                labels = torch.tensor([r_id2id[label] for label in labels], device=config.device)
             labels = labels.to(config.device)
 
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
@@ -1060,7 +1071,7 @@ def trans_memory_format(memory, cur_rel_id):
 if __name__ == '__main__':
     FUNCODE = 3  # Funcode==1为4类版本，为2为多类版本
     use_mem_network = False
-    fix_labels = True
+    fix_labels = False
     parser = ArgumentParser(
         description="Config for lifelong relation extraction (classification)")
     d_pic = False
@@ -1109,7 +1120,7 @@ if __name__ == '__main__':
         else:
             num_class = config.num_of_relation
 
-        classifier = Softmax_Layer(input_size=encoder.output_size, num_class=num_class).to(config.device)
+
         # 这里的encoder没有加dropout_layer
         contrastive_network = ContrastiveNetwork(config=config, encoder=encoder, dropout_layer=dropout_layer,
                                                  hidden_size=config.encoder_output_size).to(
@@ -1134,14 +1145,18 @@ if __name__ == '__main__':
         test_top_total = []
         if verify_history and fix_labels:
             his_data = {}
+        total_class = []
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
                 seen_relations) in enumerate(sampler):
-
+            print(current_relations)
+            total_class += current_relations
+            classifier = Softmax_Layer(input_size=encoder.output_size, num_class=len(total_class)).to(config.device)
             print(current_relations)
             cur_rel_id = set(rel2id[i] for i in current_relations)
-            temp_protos = []
+
+            temp_protos = []  # for memory network
             # for relation in seen_relations:
             #     if relation not in current_relations:
             #         temp_protos.append(get_proto(config, encoder, memorized_samples[relation]))
@@ -1168,12 +1183,13 @@ if __name__ == '__main__':
                 if steps == 1:
                     tokens_task2 = train_data_for_initial
 
+            classification_data = train_data_for_initial + list(itertools.chain(*(memory.values())))
             # warm-up
-            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                               config.step1_epochs, current_relations, rel2id, fix_labels)
+            train_simple_model(config, encoder, dropout_layer, classifier, classification_data,
+                               config.step1_epochs, total_class, rel2id, fix_labels)
 
             # first model
-            train_first(config, encoder, dropout_layer, classifier, train_data_for_initial, current_relations, rel2id,
+            train_first(config, encoder, dropout_layer, classifier, classification_data, total_class, rel2id,
                         fix_labels, FUNCODE=FUNCODE, n_rel=cur_rel_id)
 
             if verify_history and fix_labels:
