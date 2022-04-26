@@ -12,7 +12,9 @@
 # # 把项目路径加入python搜索路径
 # sys.path.append(project_path)
 import itertools
-
+from scipy.spatial.distance import cdist
+from sklearn.cluster import KMeans
+import copy
 from scipy import linalg
 import collections
 import functools
@@ -27,9 +29,7 @@ import torch.optim as optim
 import json
 import pickle
 
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from sklearn.cluster import KMeans
 from argparse import ArgumentParser
 from config import Config
 import torch.nn.functional as F
@@ -48,60 +48,126 @@ from sklearn import manifold
 import matplotlib.pyplot as plt
 
 
-def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator,
-                      memory_network=None, mem_data=None, epoch=None):
+def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator, encoder,
+                      dropout_layer,
+                      memory_network=None, mem_data=None, epoch=None, n_rel=None):
     train_dataloader = dataloader
     epoch = epoch or config.contrast_epoch
+
+    # pre_enc=copy.deepcopy(encoder)
+    # pre_drop=copy.deepcopy(dropout_layer)
     for ep in range(epoch):
         ## train
         model.train()
         t_ep = time.time()
         # epoch parameter start
         batch_cum_loss, batch_cum_acc, total_head_rel_sample_acc, total_tail_rel_sample_acc = 0., 0., 0., 0.
-        all_len = 0
+
         # epoch parameter end
         for batch_ind, batch_train_data in enumerate(train_dataloader):
             # batch parameter start
             t_batch = time.time()
-
             # batch parameter end
-
             # move to device
             # if not config.fix_sent:
-            batch_train_data = batch2device(batch_train_data, config.device)
+            # batch_train_data = batch2device(batch_train_data, config.device)
             # zero the parameter gradients
             optimizer.zero_grad()
-            sent_inp, emb_inp, labels, comparison = batch_train_data
-            # emb_inp有很多0，会有问题吗
-            # model forward start
+            sent_inp, emb_inp, labels, comparison, sentence_labels = batch_train_data
 
-            # or
-            if config.use_atm and not config.fix_sent:
-                mem_for_batch = mem_data.clone()
-                mem_for_batch.unsqueeze(0)
-                mem_for_batch = mem_for_batch.expand(len(sent_inp) + len(emb_inp), -1, -1)
-                inp_lst = [sent_inp, emb_inp, comparison, memory_network, mem_for_batch, 3]
-            elif not config.use_atm and not config.fix_sent:
-                inp_lst = [sent_inp, emb_inp, comparison, None, None, 4]
-            elif config.fix_sent:
-                # sent_inp=torch.tensor(sent_inp).to(config.device)
-                # emb_inp=torch.tensor(emb_inp).to(config.device)
-                # comparison=comparison.to(config.device)
-                # labels=labels.to(config.device)
-                # inp_lst = [sent_inp, emb_inp, comparison, None, None, 6]
+            labels = labels.to(config.device)
+            emb_inp = emb_inp.to(config.device)
 
-                inp_lst = [sent_inp, emb_inp, comparison, None, None, 4]
+            is_old, is_new = [], []
+            for i, sent_label in enumerate(sentence_labels.tolist()):
+                if sent_label not in n_rel:
+                    is_old.append(i)
+                else:
+                    is_new.append(i)
+            if config.CDE == 0:  # only old
+                if len(is_old) != 0:
+                    old_sent = sent_inp[is_old, :]
+                    old_labels = labels[is_old, :]
+                    old_labels = old_labels.repeat(config.f_pass, 1)
+                    old_sent = old_sent.to(config.device)
+                    # old sent
+                    enc_inp = encoder(old_sent)  # m Old P
+                    results_old = []
+                    for _ in range(config.f_pass):
+                        hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
+                        results_old.append(hidden)
+                    results_old = torch.cat(results_old, dim=0)
+                else:
+                    results_old = []
+                    old_labels = []
+                # new sent
+                if len(is_new) != 0:
+                    new_sent = sent_inp[is_new, :]
+                    new_labels = labels[is_new, :]
+                    new_sent = new_sent.to(config.device)
+                    # new sent
+                    left = dropout_layer(encoder(new_sent))[1]
+                    result_new = model(left, emb_inp, FUN_CODE=4)  # New P
+                    # cat
+                else:
+                    result_new = []
+                    new_labels = []
+                if len(old_labels) and len(new_labels):
+                    labels = torch.cat([old_labels, new_labels], dim=0)
+                    hidden = torch.cat([results_old, result_new], dim=0)
+                elif len(old_labels):
+                    labels = old_labels
+                    hidden = results_old
+                elif len(new_labels):
+                    labels = new_labels
+                    hidden = result_new
 
-            m_out = model(*inp_lst)
-            # model forward end
-            # grad operation start
-            hidden = m_out
-            if not config.fix_sent:
+                # results=torch.stack(results,dim=0)
+                # model forward end
+                # grad operation start
+
+                loss1 = loss_func(hidden, labels, FUNCODE=0)
+
+                # distilling
+                # optimizer.zero_grad()
+                # with torch.no_grad():
+                #     prev= pre_drop(pre_enc(old_sent))[1]#previous
+                # cur=dropout_layer(encoder(old_sent))[1]
+                # loss2=distill_loss(prev,cur)
+                # print(f"loss1/(0.1*loss2):{loss1/(1e-4*loss2)}")
+                # loss=loss1+0.1*loss2
+                loss = loss1
+                loss.backward()
+                optimizer.step()
+                # if not config.fix_sent:
+                #     loss = loss_func(hidden, labels, FUNCODE=0)
+                # else:
+                #     loss = loss_func(hidden, labels, FUNCODE=2)
+                # loss.backward()
+                # optimizer.step()
+            elif config.CDE == 1:  # enhance all
+
+                sent_inp = sent_inp.to(config.device)
+                enc_inp = encoder(sent_inp)  # m Old P
+                results = []
+                for _ in range(config.f_pass):
+                    hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
+                    results.append(hidden)
+                hidden = torch.cat(results, dim=0)
+                labels = labels.repeat(config.f_pass, 1)
                 loss = loss_func(hidden, labels, FUNCODE=0)
-            else:
-                loss = loss_func(hidden, labels, FUNCODE=2)
-            loss.backward()
-            optimizer.step()
+                loss.backward()
+                optimizer.step()
+            elif config.CDE == 2:  # no enhance
+                optimizer.zero_grad()
+                batch_train_data = batch2device(batch_train_data, config.device)
+                # zero the parameter gradients
+                sent_inp, emb_inp, labels, comparison, sentence_labels = batch_train_data
+                enc_inp = encoder(sent_inp)  # m Old P
+                hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
+                loss = loss_func(hidden, labels, FUNCODE=0)
+                loss.backward()
+                optimizer.step()
 
             # grad operation end
 
@@ -149,7 +215,7 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
     return batch_avg_acc
 
 
-def contrastive_loss(hidden, labels, FUNCODE=1):
+def contrastive_loss(hidden, labels, FUNCODE=0):
     LARGE_NUM = 1e9
     # hidden=torch.linalg.norm(hidden,dim=-1)
     # hidden1,hidden2=torch.split(hidden, 2, dim=0)
@@ -160,10 +226,12 @@ def contrastive_loss(hidden, labels, FUNCODE=1):
         logsoftmax = nn.LogSoftmax(dim=-1)
         softmax = nn.Softmax(dim=-1)
         h = softmax(hidden)
-        return -(logsoftmax(hidden) * labels).sum() / labels.shape[0]
-        # return -(logsoftmax(hidden) * labels).sum() / labels.shape[0] - 0.0001 * torch.min(
+        return -(logsoftmax(hidden) * labels / labels.shape[0]).sum()
+        # a=-(logsoftmax(hidden) * labels).sum() / labels.shape[0]
+        # b=-0.5*torch.log(torch.abs(torch.min(
         #     -h + torch.gather(h, 1, torch.argmax(labels, dim=-1).view(-1, 1)) + labels.float() * 1e10, dim=1)[
-        #     0].sum() / labels.shape[0]
+        #     0])).sum() / labels.shape[0]
+        # return a+b
 
         # ce_loss=(logsoftmax(hidden) * labels)
         # pt=torch.exp(-ce_loss)
@@ -181,12 +249,17 @@ def contrastive_loss(hidden, labels, FUNCODE=1):
 
     # logsigmoid=nn.LogSigmoid()
     # return (-logsigmoid(hidden)*labels-(1-logsigmoid(hidden))*(1-labels)).sum()/(labels.shape[0]*labels.shape[1])
-    elif FUNCODE == 2:
-        # logsoftmax = nn.LogSoftmax(dim=-1)
-        # softmax = nn.Softmax(dim=-1)
-        return -torch.min(
-            -hidden + torch.gather(hidden, 1, torch.argmax(labels, dim=-1).view(-1, 1)) + labels.float() * 1e10, dim=1)[
-            0].sum() / labels.shape[0]
+    # elif FUNCODE == 2:
+    #     # logsoftmax = nn.LogSoftmax(dim=-1)
+    #     softmax = nn.Softmax(dim=-1)
+    #     h=softmax(hidden)
+    #     return -torch.log(torch.abs(torch.min(
+    #         -h + torch.gather(h, 1, torch.argmax(labels, dim=-1).view(-1, 1)) + labels.float() * 1e10, dim=1)[
+    #         0])).sum() / labels.shape[0]
+
+
+def distill_loss(pre, cur):
+    return -torch.mean(torch.sum(F.softmax(pre, dim=1) * F.log_softmax(cur, dim=1), dim=1))
 
 
 def compute_jsd_loss(m_input):
@@ -351,12 +424,12 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, cum_r
     dropout_layer.train()
     classifier.train()
     cur_num = np.array([0, 0, 0, 0, 0, 0])
-    # criterion = nn.CrossEntropyLoss()
-    criterion = functools.partial(contrastive_loss, FUNCODE=1)
+    criterion = nn.CrossEntropyLoss()
+    # criterion = functools.partial(contrastive_loss, FUNCODE=1)
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 0.00001},
-        {'params': dropout_layer.parameters(), 'lr': 0.00001},
-        {'params': classifier.parameters(), 'lr': 0.001}
+        {'params': encoder.parameters(), 'lr': 1e-5},
+        {'params': dropout_layer.parameters(), 'lr': 1e-4},
+        {'params': classifier.parameters(), 'lr': 4e-3}
     ])
     id2sent = []
     ret_d = []
@@ -528,9 +601,9 @@ def train_last(config, encoder, dropout_layer, classifier, training_data):
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 0.00001},
-        {'params': dropout_layer.parameters(), 'lr': 0.00001},
-        {'params': classifier.parameters(), 'lr': 0.001}
+        {'params': encoder.parameters(), 'lr': 1e-5},
+        {'params': dropout_layer.parameters(), 'lr': 1e-5},
+        {'params': classifier.parameters(), 'lr': 1e-6}
     ])
 
     for epoch_i in range(epochs):
@@ -617,6 +690,7 @@ def get_proto(config, encoder, dropout_layer, mem_set):
             features.append(feature)
         features = torch.cat(features, dim=0)
         proto = torch.mean(features, dim=0, keepdim=True).cpu()
+        # proto=F.normalize(proto, dim=-1, p=2)
 
     # return the averaged prototype
     return proto
@@ -723,19 +797,47 @@ def select_data(config, encoder, dropout_layer, sample_set):
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
             feature = dropout_layer(encoder(tokens))[1].cpu()
         features.append(feature)
-
     features = np.concatenate(features)
-    # features =features/np.linalg.norm(features, ord=2, axis=-1, keepdims=True)
     num_clusters = min(config.num_protos, len(sample_set))
     distances = KMeans(n_clusters=num_clusters, random_state=0).fit_transform(features)
-
     mem_set = []
-    # mem_set.extend(sample_set[:num_clusters])
     for k in range(num_clusters):
         sel_index = np.argmin(distances[:, k])
         instance = sample_set[sel_index]
         mem_set.append(instance)
     return mem_set
+
+    # version 3
+    # features = features / np.linalg.norm(features, ord=2, axis=-1, keepdims=True)
+    # km = KMeans(n_clusters=num_clusters, init='k-means++')
+    # km.fit(features)
+    # center = np.average(km.cluster_centers_, axis=0).reshape(1, -1)
+    # d = cdist(features, center, metric='euclidean').reshape(-1)
+    # center = center.reshape(-1)
+    # c_labels = km.labels_
+    # mem_set = []
+    # for k in range(num_clusters):
+    #     sel_index = np.argmax(d*(c_labels==k))
+    #     instance = sample_set[sel_index]
+    #     mem_set.append(instance)
+    # center = center.reshape(1,-1)
+    # return mem_set, F.normalize(torch.tensor(center), dim=-1, p=2)
+    # version 2
+    # features = features / np.linalg.norm(features, ord=2, axis=-1, keepdims=True)
+    # km = KMeans(n_clusters=num_clusters, init='k-means++')
+    # km.fit(features)
+    # center = np.average(km.cluster_centers_, axis=0).reshape(1, -1)
+    # d = cdist(features, center, metric='euclidean').reshape(-1)
+    # center = center.reshape(-1)
+    # c_labels = km.labels_
+    # mem_set = []
+    # for k in range(num_clusters):
+    #     sel_index = np.argmax(d*(c_labels==k))
+    #     instance = sample_set[sel_index]
+    #     mem_set.append(instance)
+    # center = center.reshape(1,-1)
+    # return mem_set, F.normalize(torch.tensor(center), dim=-1, p=2)
+    # # version 1
 
 
 # def PCA(config,rel_rep):
@@ -776,11 +878,11 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
     dropout_layer.train()
     classifier.train()
 
-    criterion = nn.CrossEntropyLoss(reduction='sum')
+    criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 0.00001},
-        {'params': dropout_layer.parameters(), 'lr': 0.00001},
-        {'params': classifier.parameters(), 'lr': 0.001}
+        {'params': encoder.parameters(), 'lr': 1e-5},
+        {'params': dropout_layer.parameters(), 'lr': 1e-4},
+        {'params': classifier.parameters(), 'lr': 1e-3}
     ])
     for epoch_i in range(epochs):
         losses = []
@@ -813,7 +915,7 @@ def train_mem_model(config, encoder, classifier, memory_network, training_data, 
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 0.00001},
+        {'params': encoder.parameters(), 'lr': 1e-5},
         {'params': classifier.parameters(), 'lr': 0.001},
         {'params': memory_network.parameters(), 'lr': 0.0001}
     ])
@@ -976,14 +1078,16 @@ def evaluate_first_model(config, encoder, dropout_layer, classifier, test_data, 
     return correct / n
 
 
-def evaluate_contrastive_model(config, contrastive_network, memory, test_data, use_mem_net=False, memory_network=None,
+def evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_network, memory, test_data,
+                               use_mem_net=False, memory_network=None,
                                protos4eval=None, test_emb=None, new_rel=None):
     batch_size = 2
     testdata_loader = get_data_loader(config, test_data, batch_size=batch_size)
     if use_mem_net:
         memory_network.eval()
     contrastive_network.eval()
-
+    encoder.eval()
+    dropout_layer.eval()
     # protos4eval= protos4eval.unsqueeze(0)
     # protos4eval = protos4eval.expand(batch_size + config.num_protos, -1, -1)  # slow!!!!!!!!!!!!!!
     cur_num = np.array([0, 0, 0, 0, 0, 0])
@@ -1002,12 +1106,21 @@ def evaluate_contrastive_model(config, contrastive_network, memory, test_data, u
         right = torch.cat(list(test_emb.values()), dim=0).to(config.device)  # B2*H
         for step, (labels, tokens, _) in enumerate(testdata_loader):
             # results = torch.zeros(len(tokens), len(memory), device=config.device)  # B1 B2
-
             labels = torch.stack([torch.tensor(label2mem_id[label.item()], device=config.device) for label in labels],
                                  dim=-1)
             # labels = labels.to(config.device)  # B1
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)  # B1*H
-
+            # enable_dropout(dropout_layer)
+            # enc_inp = encoder(tokens)  # m Old P
+            # out_prob = []
+            # for _ in range(config.f_pass):
+            #     hidden = dropout_layer(enc_inp)[1]
+            #     logits_aa = contrastive_network(hidden, right, FUN_CODE=4)
+            #     out_prob.append(F.softmax(logits_aa, dim=-1))
+            # out_prob = torch.stack(out_prob)  # m,B,C
+            # out_std = torch.std(out_prob, dim=0)  # BC
+            # dropout_layer.eval()
+            tokens = dropout_layer(encoder(tokens))[1]
             if use_mem_net:
                 mem_for_batch = protos4eval.clone()
                 mem_for_batch.unsqueeze(0)
@@ -1017,9 +1130,7 @@ def evaluate_contrastive_model(config, contrastive_network, memory, test_data, u
                                                 memory_network=memory_network, mem_for_batch=mem_for_batch,
                                                 FUN_CODE=3)  # B1*B2
             else:
-                logits_aa = contrastive_network(tokens, right, comparison=torch.ones(len(tokens), len(memory),
-                                                                                     device=config.device),
-                                                FUN_CODE=4)  # B1*B2
+                logits_aa = contrastive_network(tokens, right, FUN_CODE=4)  # B1*B2
             # predict_matrix = torch.argmax(logits_aa, dim=-1)  # B1
             results = logits_aa
             # _, predict_matrix = torch.topk(logits_aa, k=2, dim=-1, largest=True)  # B1
@@ -1070,6 +1181,7 @@ def trans_memory_format(memory, cur_rel_id):
 
 if __name__ == '__main__':
     FUNCODE = 3  # Funcode==1为4类版本，为2为多类版本
+
     use_mem_network = False
     fix_labels = False
     parser = ArgumentParser(
@@ -1095,10 +1207,9 @@ if __name__ == '__main__':
     all_results = []
     all_results_cur = []
     for i in range(config.total_round):
-
+        print(f"total round {i}")
         test_cur = []
         test_total = []
-
         # set random seed
         random.seed(config.seed + i * 100)
 
@@ -1120,9 +1231,9 @@ if __name__ == '__main__':
         else:
             num_class = config.num_of_relation
 
-
+        # classifier = Softmax_Layer(input_size=encoder.output_size, num_class=num_class).to(config.device)
         # 这里的encoder没有加dropout_layer
-        contrastive_network = ContrastiveNetwork(config=config, encoder=encoder, dropout_layer=dropout_layer,
+        contrastive_network = ContrastiveNetwork(config=config,
                                                  hidden_size=config.encoder_output_size).to(
             config.device)
         # record testing results
@@ -1146,6 +1257,8 @@ if __name__ == '__main__':
         if verify_history and fix_labels:
             his_data = {}
         total_class = []
+        tr_total_top = []
+        tr_total = []
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
@@ -1153,7 +1266,6 @@ if __name__ == '__main__':
             print(current_relations)
             total_class += current_relations
             classifier = Softmax_Layer(input_size=encoder.output_size, num_class=len(total_class)).to(config.device)
-            print(current_relations)
             cur_rel_id = set(rel2id[i] for i in current_relations)
 
             temp_protos = []  # for memory network
@@ -1182,15 +1294,29 @@ if __name__ == '__main__':
                     tokens_task1 = train_data_for_initial
                 if steps == 1:
                     tokens_task2 = train_data_for_initial
-
-            classification_data = train_data_for_initial + list(itertools.chain(*(memory.values())))
+            # classification_data = train_data_for_initial # new data
             # warm-up
-            train_simple_model(config, encoder, dropout_layer, classifier, classification_data,
-                               config.step1_epochs, total_class, rel2id, fix_labels)
+            if steps == 0:
+                epoch1 = config.step1_epochs * 2
+            else:
+                epoch1 = config.step1_epochs
 
-            # first model
-            train_first(config, encoder, dropout_layer, classifier, classification_data, total_class, rel2id,
-                        fix_labels, FUNCODE=FUNCODE, n_rel=cur_rel_id)
+            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
+                               epoch1, total_class, rel2id, fix_labels)
+
+            classification_data = list(itertools.chain(*(memory.values())))
+            for relation in current_relations:
+                rel_id = rel2id[relation]
+                memory[rel_id] = select_data(config, encoder, dropout_layer,
+                                             training_data[relation])  # 训练以后会选择出个K个数据又记录下来
+
+            rel_rep = {}
+            for rel_id, ins_list in memory.items():
+                rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
+
+            if len(classification_data):
+                train_first(config, encoder, dropout_layer, classifier, classification_data, total_class, rel2id,
+                            fix_labels, FUNCODE=FUNCODE, n_rel=cur_rel_id)
 
             if verify_history and fix_labels:
                 if len(his_data) > 0:
@@ -1237,9 +1363,7 @@ if __name__ == '__main__':
             # for relation in current_relations:
             #     memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
             #                                            training_data[relation])  # 训练以后会选择出个K个数据又记录下来
-            # rel_rep = {}
-            # for rel_id, ins_list in memory.items():
-            #     rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
+
             # # uniform prototype
             # task_sample = False
             # ctst_dload = sample_dataloader(quadruple=train_data_for_initial, rel_rep=rel_rep, memory=memory,
@@ -1276,9 +1400,7 @@ if __name__ == '__main__':
             #     }
             # train_contrastive(**inp_dict)
 
-            for relation in current_relations:
-                memory[rel2id[relation]] = select_data(config, encoder, dropout_layer,
-                                                       training_data[relation])  # 训练以后会选择出个K个数据又记录下来
+
 
             # rel_rep_all=[]
             # for rel_id, ins_list in memory.items():
@@ -1291,18 +1413,26 @@ if __name__ == '__main__':
             # for i,rel_id in enumerate(memory.keys()):
             #     rel_rep[rel_id] = torch.unsqueeze(torch.tensor(rel_rep_all[i],device=config.device),dim=0)
 
-            rel_rep = {}
-            for rel_id, ins_list in memory.items():
-                rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
+            # rel_rep = {}
+            # for rel_id, ins_list in memory.items():
+            #     rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
 
             # Second training
+            # if steps==0:
+            #     config.step2_epochs=int(config.step2_epochs*3)
+            #     config.step3_epochs=int(config.step3_epochs*3)
+            # elif steps==1:
+            #     config.step2_epochs = config.step2_epochs //3
+            #     config.step3_epochs = config.step3_epochs //3
             config.fix_sent = False
+            config.CDE = 1
             task_sample = True
+            use_mem_data = False
             ctst_dload = sample_dataloader(quadruple=train_data_for_initial, memory=memory, rel_rep=rel_rep,
                                            id2sent=id2sentence,
                                            config=config,
                                            seed=config.seed + steps * 100, FUN_CODE=3,
-                                           task_sample=task_sample)
+                                           task_sample=task_sample, use_mem_data=use_mem_data)
 
             # memory = select_to_memory(config, encoder, dropout_layer, classifier, train_data_for_initial,
             #                           memory)  # 须在采样之后，否则本轮中会有memory
@@ -1319,7 +1449,9 @@ if __name__ == '__main__':
                 temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
                 optimizer = optim.Adam([
                     {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                    {'params': memory_network.parameters(), 'lr': 1e-4}
+                    {'params': memory_network.parameters(), 'lr': 1e-4},
+                    {'params': encoder.parameters(), 'lr': 1e-4},
+                    {'params': dropout_layer.parameters(), 'lr': 1e-4},
                 ])
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                             step_size=decay_steps,
@@ -1330,10 +1462,14 @@ if __name__ == '__main__':
                     "evaluator": None,
                     "epoch": config.step2_epochs, "memory_network": memory_network, "mem_data": temp_protos,
                     "FUNCODE": FUNCODE,
+                    "encoder": encoder,
+                    "dropout_layer": dropout_layer,
                 }
             else:
                 optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
+                    {'params': contrastive_network.parameters(), 'lr': 8e-8},
+                    {'params': encoder.parameters(), 'lr': 4e-6},
+                    {'params': dropout_layer.parameters(), 'lr': 4e-5},
                 ])
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                             step_size=decay_steps,
@@ -1343,6 +1479,10 @@ if __name__ == '__main__':
                     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
                     "evaluator": None,
                     "epoch": config.step2_epochs,
+                    "encoder": encoder,
+                    "dropout_layer": dropout_layer,
+                    "n_rel": cur_rel_id,
+
                 }
 
             # inp_dict = {
@@ -1362,6 +1502,7 @@ if __name__ == '__main__':
             # temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
             torch.cuda.empty_cache()
             task_sample = False
+            config.CDE = 0
             ctst_dload = sample_dataloader(quadruple=train_data_for_initial, rel_rep=rel_rep, memory=memory,
                                            id2sent=id2sentence,
                                            config=config,
@@ -1369,8 +1510,10 @@ if __name__ == '__main__':
                                            task_sample=task_sample)
             if use_mem_network:
                 optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
-                    {'params': memory_network.parameters(), 'lr': 1e-4}
+                    {'params': contrastive_network.parameters(), 'lr': 1e-5},
+                    {'params': memory_network.parameters(), 'lr': 1e-4},
+                    {'params': encoder.parameters(), 'lr': 1e-4},
+                    {'params': dropout_layer.parameters(), 'lr': 1e-4},
                 ])
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                             step_size=decay_steps,
@@ -1380,11 +1523,14 @@ if __name__ == '__main__':
                     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
                     "epoch": config.step3_epochs, "memory_network": memory_network, "mem_data": temp_protos,
                     "FUNCODE": FUNCODE,
+                    "encoder": encoder,
+                    "dropout_layer": dropout_layer, "n_rel": cur_rel_id,
                 }
             else:
                 optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 4e-5},
-
+                    {'params': contrastive_network.parameters(), 'lr': 6e-8},
+                    {'params': encoder.parameters(), 'lr': 4e-6},
+                    {'params': dropout_layer.parameters(), 'lr': 4e-5},
                 ])
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                             step_size=decay_steps,
@@ -1393,8 +1539,16 @@ if __name__ == '__main__':
                     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
                     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
                     "epoch": config.step3_epochs,
+                    "encoder": encoder,
+                    "dropout_layer": dropout_layer,
+                    "n_rel": cur_rel_id,
                 }
             train_contrastive(**inp_dict)
+
+            # # WA
+            # contrastive_network.align_norms()
+            # train_simple_model(config, encoder, dropout_layer, classifier, list(itertools.chain(*(memory.values()))),
+            #                    config.step1_epochs, total_class, rel2id, fix_labels)
 
             if verify_history and fix_labels:
                 his_data[steps] = train_data_for_initial
@@ -1432,7 +1586,8 @@ if __name__ == '__main__':
             if not use_mem_network:
                 memory_network = None
                 protos4eval = None
-            cont_cur_acc, topk_cur_acc = evaluate_contrastive_model(config, contrastive_network, memory, test_data_1,
+            cont_cur_acc, topk_cur_acc = evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_network,
+                                                                    memory, test_data_1,
                                                                     memory_network=memory_network,
                                                                     protos4eval=protos4eval,
                                                                     use_mem_net=use_mem_network,
@@ -1440,7 +1595,8 @@ if __name__ == '__main__':
 
             cont_total_acc, topk_total_acc = 0, 0
 
-            cont_total_acc, topk_total_acc = evaluate_contrastive_model(config, contrastive_network, memory,
+            cont_total_acc, topk_total_acc = evaluate_contrastive_model(config, dropout_layer, encoder,
+                                                                        contrastive_network, memory,
                                                                         test_data_2,
                                                                         memory_network=memory_network,
                                                                         protos4eval=protos4eval,
@@ -1465,17 +1621,20 @@ if __name__ == '__main__':
             print("\ncontrastive topk all:")
             print(test_top_cur)
             print(test_top_total)
-            a, b = evaluate_contrastive_model(config, contrastive_network, memory, test_data_2,
+            a, b = evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_network, memory, test_data_2,
                                               memory_network=memory_network,
                                               protos4eval=protos4eval, use_mem_net=use_mem_network, test_emb=rel_rep,
                                               new_rel=cur_rel_id)
+            tr_total.append(a)
+            tr_total_top.append(b)
             print(
-                f"Contrastive model use training embedding to test: history test acc:{a},Contrastive model history topK acc:{b}")
+                f"Contrastive model use training embedding to test: history test acc:{tr_total},Contrastive model history topK acc:{tr_total_top}")
             if steps == len(sampler) - 1:
-                all_results.append(test_total)
                 all_results_cur.append(test_cur)
+                all_results.append(test_total)
+
     print(f"all current results:{all_results_cur}")
     print(f"all history results:{all_results}")
 
-    print(np.average(np.array(all_results_cur), axis=1))
-    print(np.average(np.array(all_results), axis=1))
+    print(f"current average:{np.average(np.array(all_results_cur), axis=0)}")
+    print(f"history average:{np.average(np.array(all_results), axis=0)}")

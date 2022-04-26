@@ -33,9 +33,9 @@ def batch2device(batch_tuple, device):
         if isinstance(var, torch.Tensor):
             ans.append(var.to(device))
         elif isinstance(var, list):
-            ans.append(batch2device(var))
+            ans.append(batch2device(var, device))
         elif isinstance(var, tuple):
-            ans.append(tuple(batch2device(var)))
+            ans.append(tuple(batch2device(var, device)))
         else:
             ans.append(var)
     return ans

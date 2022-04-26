@@ -99,14 +99,13 @@ class Dropout_Layer(base_model):
         # self.linear1 = nn.Linear(input_size, input_size)
         self.drop = nn.Dropout(config.drop_out)
         self.linear_transform = nn.Linear(config.hidden_size * 2, config.output_size, bias=True)
-
         self.layer_normalization = nn.LayerNorm([config.output_size])
 
     def forward(self, input):
         output = self.drop(input)
         output1 = self.linear_transform(output)
         output = F.gelu(output1)
-        output = self.layer_normalization(output)
+        output = self.layer_normalization(output1 + output)
         return output, output1
 
         # output = self.linear1(input)

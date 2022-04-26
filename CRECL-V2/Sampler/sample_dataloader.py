@@ -157,24 +157,24 @@ class sample_dataloader(object):
                 self._ix = 0
                 raise StopIteration
 
-            trues = torch.tensor([item['relation'] for item in batch_change])
+            true = torch.tensor([item['relation'] for item in batch_change])
             tokens = [torch.tensor(item['tokens']) for item in batch_change]
             left_inp = torch.stack(tokens, dim=0)
 
-            random.shuffle(batch_fix)
+
             preds = torch.tensor(batch_fix)
             right_inp = torch.cat([self.rel_rep[i] for i in batch_fix], dim=0)
 
-            t, p = len(trues), len(preds)
+            t, p = len(true), len(preds)
             comparison = torch.ones((t, p))
-            trues = trues.expand((p, t)).transpose(-1, -2)
+            trues = true.expand((p, t)).transpose(-1, -2)
             preds = preds.expand((t, p))
             labels = (trues == preds).int()
 
             self.verify_metrix(labels, comparison)
 
             self._ix += 1
-            return left_inp, right_inp, labels, comparison
+            return left_inp, right_inp, labels, comparison, true
 
         elif self.FUN_CODE == 4:
 
@@ -223,17 +223,18 @@ class sample_dataloader(object):
             if self.use_mem_data:
                 for l in self.choice_object_no_replace(self.quadruple + list(itertools.chain(*self.memory.values())),
                                                        batch_size, shuffle=True):
-                    random.shuffle(right)
                     batch_d.append((l, right))
             else:
                 for l in self.choice_object_no_replace(self.quadruple, batch_size, shuffle=True):
-                    random.shuffle(right)
                     batch_d.append((l, right))
         else:
             data_pool = list(itertools.chain(*self.memory.values()))
             for l in self.choice_object_no_replace(data_pool, C, shuffle=True):
-                random.shuffle(right)
                 batch_d.append((l, right))
+
+            # for l in list(zip(*self.memory.values())):
+            #     random.shuffle(right)
+            #     batch_d.append((l, right))
         return batch_d
 
     def get_fix_sent_data(self):
