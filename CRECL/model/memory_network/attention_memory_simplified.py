@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from ..base_model import base_model
 
-
 class Attention_Memory_Simplified(base_model):
     def __init__(self, mem_slots, input_size, output_size, key_size, head_size, num_heads=4):
         super(Attention_Memory_Simplified, self).__init__()
@@ -37,6 +36,7 @@ class Attention_Memory_Simplified(base_model):
         self.output_layernorm = nn.LayerNorm([self.output_size])
 
     def multihead_attention(self, input):
+
         q = self.q_projector(input)
         q_reshape = q.view(q.shape[0], q.shape[1], self.num_heads, self.query_size)
         q_reshape = self.q_layernorm(q_reshape)
@@ -88,3 +88,4 @@ class Attention_Memory_Simplified(base_model):
         output = self.attention_over_memory(input, memory)
         output = output[:, -1, :]
         return output
+

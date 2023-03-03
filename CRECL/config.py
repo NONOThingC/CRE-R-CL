@@ -1,6 +1,5 @@
 from configparser import ConfigParser
 
-
 # This file is for parsing configs generated from config_generator.py.
 # No need to run this file.
 

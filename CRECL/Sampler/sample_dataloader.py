@@ -12,7 +12,7 @@ import itertools
 class sample_dataloader(object):
 
     def __init__(self, quadruple, memory, id2sent, config=None, seed=None, FUN_CODE=3, rel_rep=None, task_sample=True,
-                 use_mem_data=False):
+                 use_mem_data=False, picture=False):
         # When FUN_CODE is 0, quadruple is sentence of current task.
         self.quadruple = quadruple
         self.id2sent = id2sent
@@ -20,6 +20,7 @@ class sample_dataloader(object):
         self.config = config
         self.FUN_CODE = FUN_CODE
         self.use_mem_data = use_mem_data
+        self.picture = picture
         if FUN_CODE == 0:
             self.use_task_sample = task_sample
             self.data_idx = self.get_mem_enhanced_data(self.config.batch_size,
@@ -166,7 +167,10 @@ class sample_dataloader(object):
             self.verify_metrix(labels, comparison)
 
             self._ix += 1
-            return left_inp, right_inp, labels, comparison
+            if not self.picture:
+                return left_inp, right_inp, labels, comparison
+            else:
+                return left_inp, right_inp, labels, comparison, preds, trues
 
     def get_fix_proto_data(self, batch_size, use_task_sample=True):
         # kmeans结果
@@ -182,16 +186,13 @@ class sample_dataloader(object):
             if self.use_mem_data:
                 for l in self.choice_object_no_replace(self.quadruple + list(itertools.chain(*self.memory.values())),
                                                        batch_size, shuffle=True):
-                    random.shuffle(right)
                     batch_d.append((l, right))
             else:
                 for l in self.choice_object_no_replace(self.quadruple, batch_size, shuffle=True):
-                    random.shuffle(right)
                     batch_d.append((l, right))
         else:
             data_pool = list(itertools.chain(*self.memory.values()))
-            for l in self.choice_object_no_replace(data_pool, C, shuffle=True):
-                random.shuffle(right)
+            for l in self.choice_object_no_replace(data_pool, min(batch_size, C), shuffle=True):
                 batch_d.append((l, right))
         return batch_d
 
@@ -206,35 +207,18 @@ class sample_dataloader(object):
         for right_part in zip(*self.memory.values()):
             right.append(right_part)
         if use_task_sample:
-            # K=len(i)
-            # diff=(batch_size-C) # sentence minus memory : left minus right
-            # n=diff*K
-            # left_batch_size=C+diff
-            # sample_ins=random.choices(self.quadruple,k=int(n))
-            # data_pool = list(itertools.chain(*self.memory.values()))
-            # data_pool.extend(sample_ins)
-            # for l, r in zip(self.choice_object_no_replace(data_pool, left_batch_size, shuffle=True), right):
-            #     batch_d.append((l, r))
             K = len(i)
             sample_ins = random.choices(self.quadruple, k=int(K * batch_size))
             for l, r in zip(self.choice_object_no_replace(sample_ins, batch_size, shuffle=True), right):
                 batch_d.append((l, r))
         else:
             data_pool = list(itertools.chain(*self.memory.values()))
-            for l, r in zip(self.choice_object_no_replace(data_pool, C, shuffle=True), right):
+            for l, r in zip(self.choice_object_no_replace(data_pool, min(batch_size, C), shuffle=True), right):
                 batch_d.append((l, r))
         return batch_d
 
     def verify_metrix(self, labels, comparison):
-
         if self.FUN_CODE == 2:
-            """
-                    labels和comparison是两个相同的方阵，设计实现以下功能：
-                    检测以下情况，不满足时候抛出错误：
-                    1. labels为1时comparison为True(1)
-                    2. comparsion为0时labels为0
-                    要求尽量使用矩阵操作
-            """
             if comparison[labels == 1].sum() < comparison[labels == 1].shape[0] or labels[comparison == 0].sum() != 0:
                 raise Exception('labels and comparison not matched')
         elif self.FUN_CODE in [0, 1]:
@@ -293,11 +277,6 @@ class sample_dataloader(object):
 
     def get_data(self, batch_size):
         # 为各个簇统计向量位置，选一个簇类，如果有memory，在memory中找一个正向量，此簇和memory此簇中所有句子形成池，池中采样句子
-
-        # # memory update
-        # for all_items in self.memory.values():
-        #     for _, quad_ins in all_items:
-        #         self.quadruple.append(quad_ins)
         num_sent = max(1, len(self.mem_cluster2quad_p))
         mem_gen = self.get_mem_data(self.mem_cluster2quad_p, num_sent=num_sent)  # 每次返回各个类的quad_id,结束时候自动shuffle
         task_cluster = list(self.cluster2quad_p.keys())
@@ -316,7 +295,6 @@ class sample_dataloader(object):
             len_sent_batch = len(cur_all_sent_batch)
             i = 0
 
-            # for  emb in cur_clu_emb_all:
             for control, emb in enumerate(cur_clu_emb_all):
                 sent_batch = []
                 emb_batch = []
@@ -371,69 +349,6 @@ class sample_dataloader(object):
                     random.shuffle(emb_batch)
                     batch_data.append((sent_batch, emb_batch))  # batch_size,1+(task_C-1)*4
         return batch_data
-        # for cluster in task_cluster:
-        #     # choose this cluster,get all sent and every emb
-        #     cur_clu_emb_all = self.cluster2quad_p[cluster]
-        #     cur_clu_sent_all = self.sent_cluster2quad_p[cluster]
-        #     if (batch_size - num_sent) > len(cur_clu_sent_all):
-        #         count += 1
-        #         print(f"Sentence oversampling {count} times,sent:{cluster},num:{len(cur_clu_sent_all)}.")
-        #     cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent, shuffle=True)
-        #     len_sent_batch = len(cur_all_sent_batch)
-        #     i = 0
-        #
-        #     # for  emb in cur_clu_emb_all:
-        #     for control, emb in enumerate(cur_clu_emb_all):
-        #         sent_batch = []
-        #         emb_batch = []
-        #         if control & 1:
-        #             continue
-        #         # if control>2:
-        #         #     break
-        #         if len(self.mem_cluster2quad_p):
-        #             mem_emb = next(mem_gen)
-        #             # 数据加入正句子，加入正向量，采样此簇所有句子
-        #             sent_batch.extend(mem_emb[:num_sent])  # 采样mem中句子，采样num_sent个
-        #             if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
-        #                 sent_batch.extend(cur_all_sent_batch[i])
-        #             else:
-        #                 cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size - num_sent,
-        #                                                                   shuffle=True)
-        #                 len_sent_batch = len(cur_all_sent_batch)
-        #                 i = 0
-        #                 sent_batch.extend(cur_all_sent_batch[i])
-        #             # memory取正句子和向量，采样此簇所有句子
-        #             emb_batch.append(emb)
-        #             emb_batch.extend(mem_emb)
-        #             for ot_cluster in task_cluster:
-        #                 if ot_cluster != cluster:
-        #                     emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=2))
-        #             i += 1
-        #             # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
-        #             random.shuffle(sent_batch)
-        #             random.shuffle(emb_batch)
-        #             batch_data.append((sent_batch, emb_batch))  # 句子：num_sent个mem+正类个，向量：其他类*K+一个正类+mem规定采样数 batch_size:(),1+exist_C+(task_C-1)*2
-        #         else:  # mem is empty
-        #             if i < len_sent_batch:  # 采样task中句子，并在采完一次后重复
-        #                 sent_batch.extend(cur_all_sent_batch[i])
-        #             else:
-        #                 cur_all_sent_batch = self.multi_sample_no_replace(cur_clu_sent_all, batch_size,
-        #                                                                   shuffle=True)
-        #                 len_sent_batch = len(cur_all_sent_batch)
-        #                 i = 0
-        #                 sent_batch.extend(cur_all_sent_batch[i])
-        #
-        #             emb_batch.append(emb)
-        #
-        #             for ot_cluster in task_cluster:
-        #                 if ot_cluster != cluster:
-        #                     emb_batch.extend(random.choices(self.cluster2quad_p[ot_cluster], k=4))
-        #             i += 1
-        #             # 对于簇间向量进行采样，如果没有看到所有簇就重复采样
-        #             random.shuffle(sent_batch)
-        #             random.shuffle(emb_batch)
-        #             batch_data.append((sent_batch, emb_batch))  # batch_size,1+(task_C-1)*4
-        # return batch_data
 
     def get_contrastive_data(self, batch_size):
         """
@@ -444,8 +359,6 @@ class sample_dataloader(object):
         4. From memory.
         """
         # 根据句子簇分类,得到分好类的变量假设是 cluster2sentences
-
-        # if pt_pool is not None:
         pn_batch_idx = []
         p_idx = []
         p_batch_idx = []  # get positive pool
@@ -461,26 +374,6 @@ class sample_dataloader(object):
             sent_id2quad_id[quad[0]].append(i)
             if quad[-1] == quad[-2]:
                 p_idx.append(i)
-
-        # # 取簇间正向量形成训练数据
-        # p_batch_idx = [(i, 1) for i in self.multi_sample_no_replace(p_idx, batch_size)]
-
-        # # negative vector
-        # for ins in sent_id2quad_id.values():
-        #     n = len(ins) / batch_size
-        #     if n >= 1:
-        #         for i in self.multi_sample_no_replace(ins, batch_size):
-        #             pn_batch_idx.append((i, 0))
-        #         # for i in range(round(n - 0.1)):
-        #         #     pn_batch_idx.extend(np.random.choice(a=ins, size=batch_size, replace=False).tolist())
-        #     else:
-        #         if n > 0.8:  # just sample when enough positive and negative samples
-        #             count += 1
-        #             print(f"Over sampling num:{count}")
-        #             pn_batch_idx.append((np.random.choice(a=ins, size=batch_size, replace=True).tolist(), 0))
-        # p_batch_idx.extend(pn_batch_idx)
-        # memory
-
         # memory update
         start_index = len(self.quadruple)
         len_mem = 0
@@ -538,7 +431,7 @@ class sample_dataloader(object):
         self.seed = seed
         if self.seed != None:
             random.seed(self.seed)
-
+            np.random.seed(self.seed)
 
 class MyDataset(Dataset):
     def __init__(self, data):
@@ -569,7 +462,6 @@ class memory_fn(object):
         tokens_id = torch.stack(tokens_id, dim=0)
         return (labels, tokens, tokens_id)
 
-
 class data_sampler(object):
 
     def __init__(self, config=None, seed=None):
@@ -597,12 +489,6 @@ class data_sampler(object):
         self.batch = 0
         self.task_length = len(self.id2rel) // self.config.rel_per_task  # 每一轮任务进入几个新关系
         self.lb_id2train_id = list(range(len(self.shuffle_index)))
-        # start_lb=0
-        # for ind in self.shuffle_index:
-        #     self.lb_id2train_id[ind]=start_lb
-        #     start_lb += 1
-        #     if start_lb%self.config.rel_per_task==0:
-        #         start_lb=0
 
         # record relations
         self.seen_relations = []

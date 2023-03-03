@@ -48,20 +48,106 @@ from sklearn import manifold
 import matplotlib.pyplot as plt
 
 
-def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, dataloader, evaluator, encoder,
-                      dropout_layer,
-                      memory_network=None, mem_data=None, epoch=None, n_rel=None):
+def contrastive_loss(hidden, labels, FUNCODE=0):
+    LARGE_NUM = 1e9
+    # hidden=torch.linalg.norm(hidden,dim=-1)
+    # hidden1,hidden2=torch.split(hidden, 2, dim=0)
+    # batch_size = hidden1.shape[0]
+    # hidden1_large = hidden1
+    # hidden2_large = hidden2
+    if FUNCODE == 0:
+        logsoftmax = nn.LogSoftmax(dim=-1)
+        return -(logsoftmax(hidden) * labels / labels.shape[0]).sum()
+        # a=-(logsoftmax(hidden) * labels).sum() / labels.shape[0]
+        # alpha1=1
+        # alpha2=0.001
+        # m=1
+        # b=(m-torch.max(-hidden + torch.gather(hidden, 1, torch.argmax(labels, dim=-1).view(-1, 1)) , dim=1)[0]).mean()
+        #
+        # return alpha1*a+alpha2*b
+        # ce_loss=(logsoftmax(hidden) * labels)
+        # pt=torch.exp(-ce_loss)
+        # return (alpha * (1 - pt) ** gamma * ce_loss).sum()/ labels.shape[0]# focal loss
+    elif FUNCODE == 1:
+        # alpha = 0.25
+        alpha = 1
+        gamma = 2
+        ce_loss = torch.nn.functional.cross_entropy(hidden, torch.argmax(labels, dim=-1), reduction='none')
+        # ce_loss = torch.nn.functional.cross_entropy(hidden, labels.long(), reduction='none')
+        pt = torch.exp(-ce_loss)
+        # mean over the batch
+        return (alpha * (1 - pt) ** gamma * ce_loss).mean()
+    # loss=nn.CrossEntropyLoss()
+    # return loss(hidden,labels)
+
+    # logsigmoid=nn.LogSigmoid()
+    # return (-logsigmoid(hidden)*labels-(1-logsigmoid(hidden))*(1-labels)).sum()/(labels.shape[0]*labels.shape[1])
+    elif FUNCODE == 2:
+        logsoftmax = nn.LogSoftmax(dim=-1)
+        # a=-(logsoftmax(hidden) * labels).sum() / labels.shape[0]
+        alpha = 1
+        gamma = 2
+        ce_loss = torch.nn.functional.cross_entropy(hidden, torch.argmax(labels, dim=-1), reduction='none')
+        # ce_loss = torch.nn.functional.cross_entropy(hidden, labels.long(), reduction='none')
+        pt = torch.exp(-ce_loss)
+        # mean over the batch
+        a = (alpha * (1 - pt) ** gamma * ce_loss).mean()
+        alpha1 = 1
+        alpha2 = 1e-3
+        m = 2
+        # b=(m-torch.max(-hidden + torch.gather(hidden, 1, torch.argmax(labels, dim=-1).view(-1, 1)) , dim=1)[0]).mean
+        tmp, _ = torch.topk(hidden, 2, dim=1, largest=True, sorted=True)
+        tt = -tmp[:, 0] + tmp[:, 1] + m
+        b = (tt[tt >= 0]).sum() / tmp.shape[0]
+        return alpha1 * a + alpha2 * b
+
+
+def distill_loss(pre, cur):
+    return -torch.mean(torch.sum(F.softmax(pre, dim=1) * F.log_softmax(cur, dim=1), dim=1))
+
+
+# def compute_jsd_loss(m_input):
+#     # m_input: the result of m times dropout after the classifier.
+#     # size: m*B*C
+#     m = m_input.shape[0]
+#     mean = torch.mean(m_input, dim=0)# BC
+#     jsd = 0
+#     for i in range(m):
+#         loss = F.kl_div(F.softmax(mean, dim=-1), F.softmax(m_input[i], dim=-1), reduction='none')
+#         loss = loss.sum()
+#         jsd += loss / m
+#     return jsd
+def compute_jsd_loss(m_input):
+    # m_input: the result of m times dropout after the classifier.
+    # size: m*B*C
+    m = m_input.shape[0]
+    mean = torch.mean(m_input, dim=0)
+    jsd = 0
+    for i in range(m):
+        loss = F.kl_div(F.log_softmax(mean, dim=-1), F.softmax(m_input[i], dim=-1), reduction='none')
+        loss = loss.sum()
+        jsd += loss / m
+    return jsd
+
+
+def train_contrastive(config, logger, model, optimizer, scheduler, dataloader, evaluator, encoder, dropout_layer,
+                      memory_network=None, mem_data=None, epoch=None, n_rel=None, distilling=False):
     train_dataloader = dataloader
     epoch = epoch or config.contrast_epoch
+    # if distilling:
+    #     pre_enc=copy.deepcopy(encoder)
+    #     pre_drop=copy.deepcopy(dropout_layer)
+    #     pre_model=copy.deepcopy(model)
+    last_acc = -1
+    count = 0
+    ep = 0
 
-    # pre_enc=copy.deepcopy(encoder)
-    # pre_drop=copy.deepcopy(dropout_layer)
-    for ep in range(epoch):
+    while True:
         ## train
         model.train()
         t_ep = time.time()
         # epoch parameter start
-        batch_cum_loss, batch_cum_acc, total_head_rel_sample_acc, total_tail_rel_sample_acc = 0., 0., 0., 0.
+        batch_cum_loss, batch_cum_right, batch_cum_len = 0., 0., 0.
 
         # epoch parameter end
         for batch_ind, batch_train_data in enumerate(train_dataloader):
@@ -97,9 +183,12 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                         hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
                         results_old.append(hidden)
                     results_old = torch.cat(results_old, dim=0)
+                    # loss3=compute_jsd_loss(results_old)
                 else:
                     results_old = []
                     old_labels = []
+                    # loss3=0
+
                 # new sent
                 if len(is_new) != 0:
                     new_sent = sent_inp[is_new, :]
@@ -109,9 +198,18 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                     left = dropout_layer(encoder(new_sent))[1]
                     result_new = model(left, emb_inp, FUN_CODE=4)  # New P
                     # cat
+
+                    # # distilling
+                    # if distilling:
+                    #     with torch.no_grad():
+                    #         prev = pre_model(pre_drop(pre_enc(new_sent))[1], emb_inp, FUN_CODE=4)  # previous
+                    #     loss2 = distill_loss(prev, result_new)
+                    # else:
+                    #     loss2=0
                 else:
                     result_new = []
                     new_labels = []
+                    # loss2=0
                 if len(old_labels) and len(new_labels):
                     labels = torch.cat([old_labels, new_labels], dim=0)
                     hidden = torch.cat([results_old, result_new], dim=0)
@@ -126,27 +224,21 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                 # model forward end
                 # grad operation start
 
-                loss1 = loss_func(hidden, labels, FUNCODE=0)
-
-                # distilling
-                # optimizer.zero_grad()
-                # with torch.no_grad():
-                #     prev= pre_drop(pre_enc(old_sent))[1]#previous
-                # cur=dropout_layer(encoder(old_sent))[1]
-                # loss2=distill_loss(prev,cur)
-                # print(f"loss1/(0.1*loss2):{loss1/(1e-4*loss2)}")
-                # loss=loss1+0.1*loss2
+                loss1 = contrastive_loss(hidden, labels, FUNCODE=2)
+                # print(f"loss1/0.01*loss2:{loss1/(0.001*loss2)}")
+                # a,b=len(is_old),len(is_new)
+                # alpha1=(config.f_pass*a+2*b)/(config.f_pass*a+b)
+                # alpha2=(config.f_pass*a+2*b)/(b)
                 loss = loss1
                 loss.backward()
                 optimizer.step()
                 # if not config.fix_sent:
-                #     loss = loss_func(hidden, labels, FUNCODE=0)
+                #     loss = contrastive_loss(hidden, labels, FUNCODE=0)
                 # else:
-                #     loss = loss_func(hidden, labels, FUNCODE=2)
+                #     loss = contrastive_loss(hidden, labels, FUNCODE=2)
                 # loss.backward()
                 # optimizer.step()
             elif config.CDE == 1:  # enhance all
-
                 sent_inp = sent_inp.to(config.device)
                 enc_inp = encoder(sent_inp)  # m Old P
                 results = []
@@ -154,8 +246,9 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                     hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
                     results.append(hidden)
                 hidden = torch.cat(results, dim=0)
+                # loss3 = compute_jsd_loss(hidden)
                 labels = labels.repeat(config.f_pass, 1)
-                loss = loss_func(hidden, labels, FUNCODE=0)
+                loss = contrastive_loss(hidden, labels, FUNCODE=2)
                 loss.backward()
                 optimizer.step()
             elif config.CDE == 2:  # no enhance
@@ -165,23 +258,24 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
                 sent_inp, emb_inp, labels, comparison, sentence_labels = batch_train_data
                 enc_inp = encoder(sent_inp)  # m Old P
                 hidden = model(dropout_layer(enc_inp)[1], emb_inp, FUN_CODE=4)
-                loss = loss_func(hidden, labels, FUNCODE=0)
+                loss = contrastive_loss(hidden, labels, FUNCODE=2)
                 loss.backward()
                 optimizer.step()
-
             # grad operation end
 
             # accuracy calculation start
             # acc = ((softmax(hidden) > 0.5) == labels).sum() / comparison.sum()
-            acc = (torch.argmax(hidden, dim=-1) == torch.argmax(labels, dim=-1)).sum() / hidden.shape[0]
+            right = (torch.argmax(hidden, dim=-1) == torch.argmax(labels, dim=-1)).sum()
+            acc = right / hidden.shape[0]
 
             loss, acc = loss.item(), acc.item()
 
+            batch_cum_len += hidden.shape[0]
             batch_cum_loss += loss
-            batch_cum_acc += acc
+            batch_cum_right += right.item()
 
             batch_avg_loss = batch_cum_loss / (batch_ind + 1)
-            batch_avg_acc = acc
+            batch_avg_acc = batch_cum_right / batch_cum_len
             # accuracy calculation end
             batch_print_format = "\rContrastive Epoch: {}/{}, batch: {}/{}, train_loss: {}, " + "acc: {}, " + "lr: {}, batch_time: {}, total_time: {} -------------"
             # batch logger and print start
@@ -201,6 +295,23 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
 
             # change lr
             scheduler.step()
+        ep += 1
+        cont_total_acc, topk_total_acc = evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_network,
+                                                                    memory,
+                                                                    test_data_2,
+                                                                    use_mem_net=False,
+                                                                    new_rel=n_rel)
+        print(f"test acc:{cont_total_acc}")
+
+        if int(1e5 * last_acc) < int(1e5 * cont_total_acc):
+            count = 0
+        else:
+            count += 1
+        last_acc = cont_total_acc
+        if count >= 4 and batch_avg_acc >= 0.9:
+            break
+        # if ep==10:
+        #     break
         # epoch logger and print start
         # logger.log({
         #     "train_loss": batch_avg_loss,
@@ -210,69 +321,9 @@ def train_contrastive(config, logger, model, optimizer, scheduler, loss_func, da
         # })
         # epoch logger and print start
 
-    # epoch logger and print start
-    batch_avg_acc = batch_cum_acc / len(train_dataloader)
-    return batch_avg_acc
 
 
-def contrastive_loss(hidden, labels, FUNCODE=0):
-    LARGE_NUM = 1e9
-    # hidden=torch.linalg.norm(hidden,dim=-1)
-    # hidden1,hidden2=torch.split(hidden, 2, dim=0)
-    # batch_size = hidden1.shape[0]
-    # hidden1_large = hidden1
-    # hidden2_large = hidden2
-    if FUNCODE == 0:
-        logsoftmax = nn.LogSoftmax(dim=-1)
-        softmax = nn.Softmax(dim=-1)
-        h = softmax(hidden)
-        return -(logsoftmax(hidden) * labels / labels.shape[0]).sum()
-        # a=-(logsoftmax(hidden) * labels).sum() / labels.shape[0]
-        # b=-0.5*torch.log(torch.abs(torch.min(
-        #     -h + torch.gather(h, 1, torch.argmax(labels, dim=-1).view(-1, 1)) + labels.float() * 1e10, dim=1)[
-        #     0])).sum() / labels.shape[0]
-        # return a+b
 
-        # ce_loss=(logsoftmax(hidden) * labels)
-        # pt=torch.exp(-ce_loss)
-        # return (alpha * (1 - pt) ** gamma * ce_loss).sum()/ labels.shape[0]# focal loss
-    elif FUNCODE == 1:
-        alpha = 0.25
-        gamma = 2
-        # ce_loss = torch.nn.functional.cross_entropy(hidden, torch.argmax(labels,dim=-1), reduction='none')
-        ce_loss = torch.nn.functional.cross_entropy(hidden, labels, reduction='none')
-        pt = torch.exp(-ce_loss)
-        # mean over the batch
-        return (alpha * (1 - pt) ** gamma * ce_loss).mean()
-    # loss=nn.CrossEntropyLoss()
-    # return loss(hidden,labels)
-
-    # logsigmoid=nn.LogSigmoid()
-    # return (-logsigmoid(hidden)*labels-(1-logsigmoid(hidden))*(1-labels)).sum()/(labels.shape[0]*labels.shape[1])
-    # elif FUNCODE == 2:
-    #     # logsoftmax = nn.LogSoftmax(dim=-1)
-    #     softmax = nn.Softmax(dim=-1)
-    #     h=softmax(hidden)
-    #     return -torch.log(torch.abs(torch.min(
-    #         -h + torch.gather(h, 1, torch.argmax(labels, dim=-1).view(-1, 1)) + labels.float() * 1e10, dim=1)[
-    #         0])).sum() / labels.shape[0]
-
-
-def distill_loss(pre, cur):
-    return -torch.mean(torch.sum(F.softmax(pre, dim=1) * F.log_softmax(cur, dim=1), dim=1))
-
-
-def compute_jsd_loss(m_input):
-    # m_input: the result of m times dropout after the classifier.
-    # size: m*B*C
-    m = m_input.shape[0]
-    mean = torch.mean(m_input, dim=0)
-    jsd = 0
-    for i in range(m):
-        loss = F.kl_div(F.log_softmax(mean, dim=-1), F.softmax(m_input[i], dim=-1), reduction='none')
-        loss = loss.sum()
-        jsd += loss / m
-    return jsd
 
 
 # def computer_CrossEntropyLoss(predicts,labels):
@@ -427,9 +478,9 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, cum_r
     criterion = nn.CrossEntropyLoss()
     # criterion = functools.partial(contrastive_loss, FUNCODE=1)
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 1e-5},
-        {'params': dropout_layer.parameters(), 'lr': 1e-4},
-        {'params': classifier.parameters(), 'lr': 4e-3}
+        {'params': encoder.parameters(), 'lr': 5e-5},
+        {'params': dropout_layer.parameters(), 'lr': 5e-4},
+        {'params': classifier.parameters(), 'lr': 5e-3}
     ])
     id2sent = []
     ret_d = []
@@ -523,6 +574,7 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, cum_r
                 time.time() - t_ep,
             ),
                 end="")
+
             # if FUNCODE != 0:
             #     # data store
             #     if epoch_i == epochs - 1:
@@ -840,6 +892,7 @@ def select_data(config, encoder, dropout_layer, sample_set):
     # # version 1
 
 
+
 # def PCA(config,rel_rep):
 #     from sklearn.decomposition import PCA
 #     feature=torch.cat(list(rel_rep.values()),dim=0)
@@ -880,10 +933,13 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 1e-5},
-        {'params': dropout_layer.parameters(), 'lr': 1e-4},
-        {'params': classifier.parameters(), 'lr': 1e-3}
+        {'params': encoder.parameters(), 'lr': 5e-5},
+        {'params': dropout_layer.parameters(), 'lr': 5e-4},
+        {'params': classifier.parameters(), 'lr': 5e-3}
     ])
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                step_size=decay_steps,
+                                                gamma=decay_rate)
     for epoch_i in range(epochs):
         losses = []
         for step, (labels, tokens, tokens_id) in enumerate(data_loader):
@@ -904,6 +960,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
             # torch.nn.utils.clip_grad_norm_(dropout_layer.parameters(), config.max_grad_norm)
             # torch.nn.utils.clip_grad_norm_(classifier.parameters(), config.max_grad_norm)
             optimizer.step()
+            scheduler.step()
         print(f"loss is {np.array(losses).mean()}")
 
 
@@ -1093,7 +1150,7 @@ def evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_netwo
     cur_num = np.array([0, 0, 0, 0, 0, 0])
     cum_right = 0
     cum_len = 0
-    top_k_right = 0
+    # top_k_right = 0
     if test_emb is None:
         test_emb = {}
         for label_id, ins_list in memory.items():
@@ -1142,13 +1199,13 @@ def evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_netwo
             #     [torch.tensor(mem_id2label[i], device=config.device) for i in torch.argmax(results, dim=-1)], dim=-1)  # B1
             # torch.gather(results)
             preds = torch.argmax(results, dim=-1)  # B
-            _, topk_preds = torch.topk(results, k=2, dim=-1, largest=True)  # B K
-            topk_mask = torch.zeros((preds.shape[0], len(label2mem_id)), device=config.device).scatter_(-1, topk_preds,
-                                                                                                        1)
+            # _, topk_preds = torch.topk(results, k=2, dim=-1, largest=True)  # B K
+            # topk_mask = torch.zeros((preds.shape[0], len(label2mem_id)), device=config.device).scatter_(-1, topk_preds,
+            #                                                                                             1)
             labels_mask = torch.zeros((preds.shape[0], len(label2mem_id)), device=config.device).scatter_(-1,
                                                                                                           labels.view(
                                                                                                               -1, 1), 1)
-            top_k_right += (topk_mask * labels_mask).sum().item()
+            # top_k_right += (topk_mask * labels_mask).sum().item()
             cum_right += (labels == preds).sum().item()
             cum_len += len(preds)
             num = statistic_old_new(preds, labels, new_rel=new_rel)
@@ -1156,7 +1213,7 @@ def evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_netwo
     print(f"Contrastive acc is {cum_right / cum_len}")
     print(
         f"test:(too,tnn,foo,fnn,fon,fno):{cur_num},old,new pred error rate:{((cur_num[2] + cur_num[4]) / (cur_num[0] + cur_num[2] + cur_num[4]), (cur_num[3] + cur_num[5]) / (cur_num[3] + cur_num[1] + cur_num[5]))}")
-    return cum_right / cum_len, top_k_right / cum_len
+    return cum_right / cum_len, None
 
 
 def quads2origin_data(quads, id2sentence):
@@ -1231,7 +1288,7 @@ if __name__ == '__main__':
         else:
             num_class = config.num_of_relation
 
-        # classifier = Softmax_Layer(input_size=encoder.output_size, num_class=num_class).to(config.device)
+        classifier = Softmax_Layer(input_size=encoder.output_size, num_class=num_class).to(config.device)
         # 这里的encoder没有加dropout_layer
         contrastive_network = ContrastiveNetwork(config=config,
                                                  hidden_size=config.encoder_output_size).to(
@@ -1259,13 +1316,24 @@ if __name__ == '__main__':
         total_class = []
         tr_total_top = []
         tr_total = []
+        most_high_his = []
+        all_high_his = []
         # load data and start computation
         for steps, (
                 training_data, valid_data, test_data, current_relations, historic_test_data,
                 seen_relations) in enumerate(sampler):
+            # prepare test data
+            test_data_1 = []
+            for relation in current_relations:
+                test_data_1 += test_data[relation]
+
+            test_data_2 = []
+            for relation in seen_relations:
+                test_data_2 += historic_test_data[relation]
+
             print(current_relations)
             total_class += current_relations
-            classifier = Softmax_Layer(input_size=encoder.output_size, num_class=len(total_class)).to(config.device)
+            # classifier = Softmax_Layer(input_size=encoder.output_size, num_class=len(total_class)).to(config.device)
             cur_rel_id = set(rel2id[i] for i in current_relations)
 
             temp_protos = []  # for memory network
@@ -1296,15 +1364,10 @@ if __name__ == '__main__':
                     tokens_task2 = train_data_for_initial
             # classification_data = train_data_for_initial # new data
             # warm-up
-            if steps == 0:
-                epoch1 = config.step1_epochs * 2
-            else:
-                epoch1 = config.step1_epochs
-
             train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial,
-                               epoch1, total_class, rel2id, fix_labels)
+                               config.step1_epochs, current_relations, rel2id, fix_labels)
 
-            classification_data = list(itertools.chain(*(memory.values())))
+            # classification_data =list(itertools.chain(*(memory.values())))
             for relation in current_relations:
                 rel_id = rel2id[relation]
                 memory[rel_id] = select_data(config, encoder, dropout_layer,
@@ -1314,9 +1377,22 @@ if __name__ == '__main__':
             for rel_id, ins_list in memory.items():
                 rel_rep[rel_id] = get_proto(config, encoder, dropout_layer, ins_list)
 
-            if len(classification_data):
-                train_first(config, encoder, dropout_layer, classifier, classification_data, total_class, rel2id,
-                            fix_labels, FUNCODE=FUNCODE, n_rel=cur_rel_id)
+            cont_total_acc, topk_total_acc = evaluate_contrastive_model(config, dropout_layer, encoder,
+                                                                        contrastive_network, memory,
+                                                                        test_data_2,
+                                                                        test_emb=rel_rep,
+                                                                        use_mem_net=False,
+                                                                        new_rel=cur_rel_id)
+            print(f"after simple training:{cont_total_acc}")
+            # if len(classification_data):
+            #     train_first(config, encoder, dropout_layer, classifier, classification_data, total_class, rel2id,
+            #             fix_labels, FUNCODE=FUNCODE, n_rel=cur_rel_id)
+            #     cont_total_acc, topk_total_acc = evaluate_contrastive_model(config, dropout_layer, encoder,
+            #                                                                 contrastive_network, memory,
+            #                                                                 test_data_2,
+            #                                                                 use_mem_net=False,
+            #                                                                 new_rel=cur_rel_id)
+            #     print(f"after first training:{cont_total_acc}")
 
             if verify_history and fix_labels:
                 if len(his_data) > 0:
@@ -1354,7 +1430,7 @@ if __name__ == '__main__':
             #                                             gamma=decay_rate)
             # inp_dict = {
             #     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-            #     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
+            #     "scheduler": scheduler,  "dataloader": ctst_dload,
             #     "evaluator": None,
             #     "epoch": config.step2_epochs,
             # }
@@ -1381,7 +1457,7 @@ if __name__ == '__main__':
             #                                                 gamma=decay_rate)
             #     inp_dict = {
             #         "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-            #         "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+            #         "scheduler": scheduler,  "dataloader": ctst_dload, "evaluator": None,
             #         "epoch": config.step3_epochs, "memory_network": memory_network, "mem_data": temp_protos,
             #         "FUNCODE": FUNCODE,
             #     }
@@ -1395,7 +1471,7 @@ if __name__ == '__main__':
             #                                                 gamma=decay_rate)
             #     inp_dict = {
             #         "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-            #         "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
+            #         "scheduler": scheduler,  "dataloader": ctst_dload, "evaluator": None,
             #         "epoch": config.step3_epochs,
             #     }
             # train_contrastive(**inp_dict)
@@ -1425,9 +1501,9 @@ if __name__ == '__main__':
             #     config.step2_epochs = config.step2_epochs //3
             #     config.step3_epochs = config.step3_epochs //3
             config.fix_sent = False
-            config.CDE = 1
+            config.CDE = 0
             task_sample = True
-            use_mem_data = False
+            use_mem_data = True
             ctst_dload = sample_dataloader(quadruple=train_data_for_initial, memory=memory, rel_rep=rel_rep,
                                            id2sent=id2sentence,
                                            config=config,
@@ -1458,7 +1534,7 @@ if __name__ == '__main__':
                                                             gamma=decay_rate)
                 inp_dict = {
                     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
+                    "scheduler": scheduler, "dataloader": ctst_dload,
                     "evaluator": None,
                     "epoch": config.step2_epochs, "memory_network": memory_network, "mem_data": temp_protos,
                     "FUNCODE": FUNCODE,
@@ -1467,16 +1543,16 @@ if __name__ == '__main__':
                 }
             else:
                 optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 8e-8},
-                    {'params': encoder.parameters(), 'lr': 4e-6},
-                    {'params': dropout_layer.parameters(), 'lr': 4e-5},
+                    {'params': contrastive_network.parameters(), 'lr': 8e-6},
+                    {'params': encoder.parameters(), 'lr': 4e-5},
+                    {'params': dropout_layer.parameters(), 'lr': 6e-5},
                 ])
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
                                                             step_size=decay_steps,
                                                             gamma=decay_rate)
                 inp_dict = {
                     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload,
+                    "scheduler": scheduler, "dataloader": ctst_dload,
                     "evaluator": None,
                     "epoch": config.step2_epochs,
                     "encoder": encoder,
@@ -1487,7 +1563,7 @@ if __name__ == '__main__':
 
             # inp_dict = {
             #     "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-            #     "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,"FUNCODE":1,
+            #     "scheduler": scheduler,  "dataloader": ctst_dload, "evaluator": None,"FUNCODE":1,
             # }
 
             train_contrastive(**inp_dict)
@@ -1500,50 +1576,51 @@ if __name__ == '__main__':
             # for ins_list in memory.values():
             #     temp_protos.append(get_proto(config, encoder, dropout_layer, ins_list))
             # temp_protos = torch.cat(temp_protos, dim=0).detach()  # 新和老关系都被选择到了
-            torch.cuda.empty_cache()
-            task_sample = False
-            config.CDE = 0
-            ctst_dload = sample_dataloader(quadruple=train_data_for_initial, rel_rep=rel_rep, memory=memory,
-                                           id2sent=id2sentence,
-                                           config=config,
-                                           seed=config.seed + steps * 100, FUN_CODE=3,
-                                           task_sample=task_sample)
-            if use_mem_network:
-                optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 1e-5},
-                    {'params': memory_network.parameters(), 'lr': 1e-4},
-                    {'params': encoder.parameters(), 'lr': 1e-4},
-                    {'params': dropout_layer.parameters(), 'lr': 1e-4},
-                ])
-                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                            step_size=decay_steps,
-                                                            gamma=decay_rate)
-                inp_dict = {
-                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-                    "epoch": config.step3_epochs, "memory_network": memory_network, "mem_data": temp_protos,
-                    "FUNCODE": FUNCODE,
-                    "encoder": encoder,
-                    "dropout_layer": dropout_layer, "n_rel": cur_rel_id,
-                }
-            else:
-                optimizer = optim.Adam([
-                    {'params': contrastive_network.parameters(), 'lr': 6e-8},
-                    {'params': encoder.parameters(), 'lr': 4e-6},
-                    {'params': dropout_layer.parameters(), 'lr': 4e-5},
-                ])
-                scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                            step_size=decay_steps,
-                                                            gamma=decay_rate)
-                inp_dict = {
-                    "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
-                    "scheduler": scheduler, "loss_func": contrastive_loss, "dataloader": ctst_dload, "evaluator": None,
-                    "epoch": config.step3_epochs,
-                    "encoder": encoder,
-                    "dropout_layer": dropout_layer,
-                    "n_rel": cur_rel_id,
-                }
-            train_contrastive(**inp_dict)
+
+            # torch.cuda.empty_cache()
+            # task_sample = False
+            # config.CDE = 2
+            # ctst_dload = sample_dataloader(quadruple=train_data_for_initial, rel_rep=rel_rep, memory=memory,
+            #                                id2sent=id2sentence,
+            #                                config=config,
+            #                                seed=config.seed + steps * 100, FUN_CODE=3,
+            #                                task_sample=task_sample)
+            # if use_mem_network:
+            #     optimizer = optim.Adam([
+            #         {'params': contrastive_network.parameters(), 'lr': 1e-5},
+            #         {'params': memory_network.parameters(), 'lr': 1e-4},
+            #         {'params': encoder.parameters(), 'lr': 4e-4},
+            #         {'params': dropout_layer.parameters(), 'lr': 6e-4},
+            #     ])
+            #     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+            #                                                 step_size=decay_steps,
+            #                                                 gamma=decay_rate)
+            #     inp_dict = {
+            #         "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+            #         "scheduler": scheduler,  "dataloader": ctst_dload, "evaluator": None,
+            #         "epoch": config.step3_epochs, "memory_network": memory_network, "mem_data": temp_protos,
+            #         "FUNCODE": FUNCODE,
+            #         "encoder": encoder,
+            #         "dropout_layer": dropout_layer,"n_rel":cur_rel_id,
+            #     }
+            # else:
+            #     optimizer = optim.Adam([
+            #         {'params': contrastive_network.parameters(), 'lr': 1e-6},
+            #         {'params': encoder.parameters(), 'lr': 4e-5},
+            #         {'params': dropout_layer.parameters(), 'lr': 8e-5},
+            #     ])
+            #     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+            #                                                 step_size=decay_steps,
+            #                                                 gamma=decay_rate)
+            #     inp_dict = {
+            #         "config": config, "logger": None, "model": contrastive_network, "optimizer": optimizer,
+            #         "scheduler": scheduler,  "dataloader": ctst_dload, "evaluator": None,
+            #         "epoch": config.step3_epochs,
+            #         "encoder": encoder,
+            #         "dropout_layer": dropout_layer,
+            #         "n_rel":cur_rel_id,
+            #     }
+            # train_contrastive(**inp_dict)
 
             # # WA
             # contrastive_network.align_norms()
@@ -1558,13 +1635,7 @@ if __name__ == '__main__':
                     flag = True
                     tsne_plot(config, encoder, dropout_layer, tokens_task1, tokens_task2, flag, num_points)
 
-            test_data_1 = []
-            for relation in current_relations:
-                test_data_1 += test_data[relation]
 
-            test_data_2 = []
-            for relation in seen_relations:
-                test_data_2 += historic_test_data[relation]
             # trash clean
             ctst_dload = None
             # cur_acc = evaluate_first_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations)
@@ -1611,16 +1682,16 @@ if __name__ == '__main__':
             test_cur.append(cont_cur_acc)
             test_total.append(cont_total_acc)
 
-            test_top_cur.append(topk_cur_acc)
-            test_top_total.append(topk_total_acc)
-            print(f'\nContrastive model current topK test acc:{topk_cur_acc}')
-            print(f'Contrastive model history topK acc:{topk_total_acc}')
+            # test_top_cur.append(topk_cur_acc)
+            # test_top_total.append(topk_total_acc)
+            # print(f'\nContrastive model current topK test acc:{topk_cur_acc}')
+            # print(f'Contrastive model history topK acc:{topk_total_acc}')
             print("\ncontrastive all:")
             print(test_cur)
             print(test_total)
-            print("\ncontrastive topk all:")
-            print(test_top_cur)
-            print(test_top_total)
+            # print("\ncontrastive topk all:")
+            # print(test_top_cur)
+            # print(test_top_total)
             a, b = evaluate_contrastive_model(config, dropout_layer, encoder, contrastive_network, memory, test_data_2,
                                               memory_network=memory_network,
                                               protos4eval=protos4eval, use_mem_net=use_mem_network, test_emb=rel_rep,
@@ -1629,12 +1700,18 @@ if __name__ == '__main__':
             tr_total_top.append(b)
             print(
                 f"Contrastive model use training embedding to test: history test acc:{tr_total},Contrastive model history topK acc:{tr_total_top}")
+            most_high_his.append(max(a, cont_total_acc))
+            print(
+                f"highest history test acc:{most_high_his}")
             if steps == len(sampler) - 1:
                 all_results_cur.append(test_cur)
                 all_results.append(test_total)
+                all_high_his.append(most_high_his)
 
     print(f"all current results:{all_results_cur}")
     print(f"all history results:{all_results}")
 
     print(f"current average:{np.average(np.array(all_results_cur), axis=0)}")
     print(f"history average:{np.average(np.array(all_results), axis=0)}")
+
+    print(f"highest history average:{np.average(np.array(all_high_his), axis=0)}")

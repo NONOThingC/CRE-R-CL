@@ -5,7 +5,6 @@ import numpy as np
 from ..base_model import base_model
 from transformers import BertModel, BertConfig
 
-
 class Bert_Encoder(base_model):
 
     def __init__(self, config):

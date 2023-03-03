@@ -3,7 +3,6 @@ import torch.nn as nn
 import os
 import json
 
-
 class base_model(nn.Module):
 
     def __init__(self):

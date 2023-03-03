@@ -3,29 +3,6 @@ import random
 import numpy as np
 import time
 import sys
-import itertools
-
-
-def statistic_old_new(pred, truth, new_rel):
-    too, tnn, foo, fnn, fon, fno = 0, 0, 0, 0, 0, 0
-    for p, t in zip(pred.reshape(-1).tolist(), truth.reshape(-1).tolist()):
-        if p == t:
-            if t in new_rel:
-                tnn += 1
-            else:
-                too += 1
-        else:
-            if t in new_rel and p in new_rel:
-                fnn += 1
-            elif t not in new_rel and p in new_rel:
-                fon += 1
-            elif t in new_rel and p not in new_rel:
-                fno += 1
-            else:
-                foo += 1
-    # return (oo,nn,on,no),(oo/(oo+on),nn/(no+nn))#(旧关系预测对数目，旧关系预测成新关系数目，新关系预测成旧关系数目，新关系预测对数目），（两个recall，对应的是TPR和1-FRP）
-    return np.array((too, tnn, foo, fnn, fon, fno))
-
 
 def batch2device(batch_tuple, device):
     ans = []
@@ -40,14 +17,12 @@ def batch2device(batch_tuple, device):
             ans.append(var)
     return ans
 
-
 def set_seed(config, seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if config['n_gpu'] > 0 and torch.cuda.is_available() and config['use_gpu']:
         torch.cuda.manual_seed_all(seed)
-
 
 class outputer(object):
 
